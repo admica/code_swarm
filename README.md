@@ -47,13 +47,13 @@ An intelligent documentation agent that automatically generates and maintains RE
 
 Both agents can optionally use Ollama for AI-powered analysis:
 
-Install Ollama from ollama.ai
-Run the Ollama service
-The agents will automatically use it if available
+1. Install Ollama from ollama.ai
+2. Run the Ollama service
+3. The agents will automatically use it if available
 
 ### Requirements
 
-Python 3.6+
-Git repository
-Required Python packages (see requirements.txt)
-Ollama (optional, for AI analysis)
+- Python 3.6+
+- Git repository
+- Required Python packages (see requirements.txt)
+- Ollama (optional, for AI analysis)
