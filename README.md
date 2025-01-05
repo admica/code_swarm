@@ -9,13 +9,13 @@ A Git-aware Python file monitoring agent that automatically analyzes code change
 
 ## Features
 
-* 🔍 Real-time monitoring of Python files in a directory and its subdirectories
-* 📊 Multiple analysis metrics:
-** Syntax correctness
-** Style consistency with other project files
-** Code complexity based on changes
-** PEP standards compliance using Pylint
-* 🤖 Optional AI-powered change analysis using Ollama
-* 📝 Automatic changelog generation for each Python file
-* 🔄 Git integration for tracking changes
-* ⚙️ Configurable via config.ini
+- 🔍 Real-time monitoring of Python files in a directory and its subdirectories
+- 📊 Multiple analysis metrics:
+  - Syntax correctness
+  - Style consistency with other project files
+  - Code complexity based on changes
+  - PEP standards compliance using Pylint
+- 🤖 Optional AI-powered change analysis using Ollama
+- 📝 Automatic changelog generation for each Python file
+- 🔄 Git integration for tracking changes
+- ⚙️ Configurable via config.ini
