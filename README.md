@@ -34,6 +34,21 @@ An intelligent documentation agent that automatically generates and maintains RE
 - 🔄 Maintains documentation consistency across updates
 - ⚙️ Configurable via config.ini
 
+### Dependency Graph Agent (agent_code_mon_deps.py)
+
+A visualization agent that automatically maps and tracks dependencies between Python files in your project. It creates and maintains dynamic dependency graphs showing how your modules interact.
+
+- 📊 Real-time dependency visualization using Mermaid diagrams
+- 🔍 Detects multiple types of dependencies:
+  - Direct imports
+  - Class inheritance
+  - Type annotations
+  - Module usage patterns
+- 📁 Directory-aware grouping
+- 🌳 Configurable search depth
+- 🎨 Customizable diagram layouts
+- 📝 Detailed dependency documentation
+
 ### Each agent will:
 
 - Monitor your Python files for changes
