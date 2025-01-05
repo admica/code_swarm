@@ -3,11 +3,11 @@ AI Agents that assist with programming tasks
 
 ![logo](logo.png)
 
-# Python Code Monitor Agent
+## Python Code Monitor Agent
 
 A Git-aware Python file monitoring agent that automatically analyzes code changes and maintains per-file changelogs. This tool helps track code evolution by monitoring Python files in a directory, analyzing changes, and maintaining detailed changelog files for each monitored file.
 
-## Features
+### Features
 
 - 🔍 Real-time monitoring of Python files in a directory and its subdirectories
 - 📊 Multiple analysis metrics:
