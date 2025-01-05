@@ -10,14 +10,19 @@ AI Agents that assist with programming tasks
 A Git-aware Python file monitoring agent that automatically analyzes code changes and maintains per-file changelogs. This tool helps track code evolution by monitoring Python files in a directory, analyzing changes, and maintaining detailed changelog files for each monitored file.
 
 🔍 Real-time monitoring of Python files in a directory and its subdirectories
+
 📊 Multiple analysis metrics:
   - Syntax correctness
   - Style consistency with other project files
   - Code complexity based on changes
   - PEP standards compliance using Pylint
+
 🤖 Optional AI-powered change analysis using Ollama
+
 📝 Automatic changelog generation for each Python file
+
 🔄 Git integration for tracking changes
+
 ⚙️ Configurable via config.ini
 
 ### README Agent (agent_code_mon_readme.py)
@@ -25,13 +30,17 @@ A Git-aware Python file monitoring agent that automatically analyzes code change
 An intelligent documentation agent that automatically generates and maintains README files for Python modules. It analyzes Python files in real-time and creates comprehensive, up-to-date documentation that stays consistent with your code.
 
 📝 Automatic README generation for each Python file
+
 🔍 Extracts and organizes:
   - Module overview and purpose
   - Function documentation
   - Class and method descriptions
   - Dependencies
+
 🤖 Optional AI-powered summaries using Ollama
+
 🔄 Maintains documentation consistency across updates
+
 ⚙️ Configurable via config.ini
 
 ### Each agent will:
