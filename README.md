@@ -57,6 +57,7 @@ A visualization agent that automatically maps and tracks dependencies between Py
 - Create separate documentation files:
   - filename.py_CHANGELOG.md for change history
   - filename.py_README.md for module documentation
+  - dependency_graph.md for project-wide dependency visualization
 
 ### AI Integration
 
