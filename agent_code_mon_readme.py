@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PATH: ./agent_code_mon_readme.py
 """
 Agent that automatically generates and maintains README files for Python modules.
 """
