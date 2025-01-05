@@ -113,11 +113,14 @@ class CodeAnalyzer:
             file_path: Path to the file relative to repository root
 
         Returns:
-            Content of the file from last Git commit
+            Content of the file from last Git commit or empty string if no commits
         """
         try:
+            if not self.repo.head.is_valid():
+                logger.info(f"No commits yet in repository for {file_path}")
+                return ""
             return self.repo.git.show(f'HEAD:{file_path}')
-        except git.exc.GitCommandError as e:
+        except (git.exc.GitCommandError, ValueError) as e:
             logger.warning(f"Could not get previous version of {file_path} from Git: {e}")
             return ""
 
@@ -160,13 +163,22 @@ class CodeAnalyzer:
             with open(temp_path, "w") as f:
                 f.write(content)
 
-            pylint.lint.Run([temp_path], reporter=reporter, do_exit=False)
+            try:
+                # Try new Pylint API first
+                pylint.lint.Run([temp_path], reporter=reporter, exit=False)
+            except TypeError:
+                # Fallback to old API if needed
+                pylint.lint.Run([temp_path], reporter=reporter)
 
             os.remove(temp_path)
 
-            results = json.loads(output.getvalue())
-            score = max(0, 10 - len(results))
-            return float(score * 10)
+            try:
+                results = json.loads(output.getvalue())
+                score = max(0, 10 - len(results))
+                return float(score * 10)
+            except json.JSONDecodeError:
+                logger.warning("Could not parse Pylint output, returning default score")
+                return 50.0  # Default middle score
         except Exception as e:
             logger.error(f"Error during Pylint analysis: {e}")
             return 0.0
@@ -259,12 +271,19 @@ class CodeAnalyzer:
             new_content: New version of the code
 
         Returns:
-            AI analysis text or None if feature disabled
+            AI analysis text or None if feature disabled or Ollama not available
         """
         if 'ai_analysis' not in self.enabled_features:
             return None
 
         try:
+            # First check if Ollama is available
+            try:
+                requests.get(self.ollama_url.rsplit('/', 1)[0], timeout=1)
+            except requests.exceptions.RequestException:
+                logger.warning("Ollama service not available, skipping AI analysis")
+                return None
+
             prompt = f"""Compare these two versions of Python code and provide a brief analysis:
 
 Old version:
@@ -286,14 +305,18 @@ Keep the response under 200 words."""
                 timeout=30
             )
 
+            if response.status_code == 404:
+                logger.warning("Ollama endpoint not found, skipping AI analysis")
+                return None
+
             response.raise_for_status()
             return response.json().get('response', 'No analysis available')
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error getting AI analysis: {e}")
-            return "Failed to connect to Ollama service"
+            logger.warning(f"Ollama service error: {e}")
+            return None
         except Exception as e:
             logger.error(f"Unexpected error in AI analysis: {e}")
-            return "Failed to process AI analysis"
+            return None
 
     def update_changelog(self, file_path: str, changes_description: str) -> None:
         """Update the changelog file specific to the modified Python file.
