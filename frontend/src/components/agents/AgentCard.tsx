@@ -1,6 +1,6 @@
 import { AgentState, AgentType } from '@/types/agents';
 import { agentsApi } from '@/lib/api';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 const agentInfo: Record<string, { title: string; description: string }> = {
   changelog: {
@@ -29,14 +29,29 @@ export function AgentCard({ agent, onStatusChange }: AgentCardProps) {
   const handleControl = async (action: 'start' | 'stop') => {
     try {
       setIsLoading(true);
-      await agentsApi.controlAgent(agent.name, action);
-      onStatusChange?.(agent);
+      console.log(`${action}ing agent ${agent.name}...`);
+      const response = await agentsApi.controlAgent(agent.name, action);
+      console.log('Agent control response:', response);
+      
+      // Update local state with the response
+      if (response) {
+        onStatusChange?.(response);
+      }
     } catch (error) {
       console.error('Error controlling agent:', error);
     } finally {
       setIsLoading(false);
     }
   };
+
+  // Debug log when agent status changes
+  useEffect(() => {
+    console.log(`Agent ${agent.name} status:`, {
+      running: agent.running,
+      pid: agent.pid,
+      error: agent.last_error
+    });
+  }, [agent]);
 
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-800/50 shadow-lg">
@@ -57,9 +72,21 @@ export function AgentCard({ agent, onStatusChange }: AgentCardProps) {
           {info.description}
         </p>
 
+        {agent.monitor_path && (
+          <div className="mt-4 text-sm text-slate-400">
+            <span className="font-medium text-slate-300">Monitoring:</span> {agent.monitor_path}
+          </div>
+        )}
+
         {agent.last_error && (
           <div className="mt-4 text-sm text-red-300">
             <span className="font-medium">Error:</span> {agent.last_error}
+          </div>
+        )}
+
+        {agent.pid && (
+          <div className="mt-4 text-sm text-slate-400">
+            <span className="font-medium text-slate-300">PID:</span> {agent.pid}
           </div>
         )}
 
@@ -73,7 +100,7 @@ export function AgentCard({ agent, onStatusChange }: AgentCardProps) {
                 : 'bg-green-900/50 text-green-300 hover:bg-green-900'
               } disabled:opacity-50`}
           >
-            {agent.running ? 'Stop' : 'Start'}
+            {isLoading ? 'Loading...' : agent.running ? 'Stop' : 'Start'}
           </button>
         </div>
       </div>

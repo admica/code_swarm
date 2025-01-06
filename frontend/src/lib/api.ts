@@ -39,7 +39,7 @@ async function handleApiError(error: unknown): Promise<never> {
 
 export const agentsApi = {
   // Get status of all agents
-  getAgents: async (): Promise<AgentState[]> => {
+  getAgents: async (): Promise<Record<string, AgentState>> => {
     try {
       const response = await api.get('/agents');
       return response.data;
@@ -79,15 +79,9 @@ export const agentsApi = {
   },
 
   // Start/stop agents
-  controlAgent: async (agentId: string, action: 'start' | 'stop', path?: string) => {
+  controlAgent: async (agentName: string, action: 'start' | 'stop'): Promise<AgentState> => {
     try {
-      const params = new URLSearchParams();
-      if (path && action === 'start') {
-        params.append('path', path);
-      }
-      const response = await api.post(
-        `/agents/${agentId}/${action}${params.toString() ? `?${params.toString()}` : ''}`
-      );
+      const response = await api.post(`/agents/${agentName}/${action}`);
       return response.data;
     } catch (error) {
       return handleApiError(error);
@@ -117,9 +111,21 @@ export const agentsApi = {
   },
 
   // Get agent logs
-  getAgentLogs: async (agentName: string, lines: number = 100) => {
+  getAgentLogs: async (agentName: string, lines: number = 100): Promise<string[]> => {
     try {
-      const response = await api.get(`/agents/${agentName}/logs?lines=${lines}`);
+      const response = await api.get(`/agents/${agentName}/logs`, {
+        params: { lines }
+      });
+      return response.data;
+    } catch (error) {
+      return handleApiError(error);
+    }
+  },
+
+  // Update skip list
+  updateSkipList: async (skipList: string[]) => {
+    try {
+      const response = await api.post('/config/skip-list', { skip_list: skipList });
       return response.data;
     } catch (error) {
       return handleApiError(error);

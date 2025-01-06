@@ -4,9 +4,9 @@ import { useEffect, useState } from 'react';
 import { AgentState } from '@/types/agents';
 import { agentsApi } from '@/lib/api';
 import { useWebSocket, ConnectionStatus } from '@/lib/websocket';
-import { AgentCard } from '@/components/agents/AgentCard';
-import { MonitorPathSelector } from '@/components/MonitorPathSelector';
-import { LogWindow } from '@/components/LogWindow';
+import { TabNavigation } from '@/components/TabNavigation';
+import { Dashboard } from '@/components/Dashboard';
+import { Settings } from '@/components/Settings';
 
 export default function Home() {
   const [agents, setAgents] = useState<Record<string, AgentState>>({});
@@ -14,6 +14,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [wsStatus, setWsStatus] = useState<ConnectionStatus>('disconnected');
+  const [activeTab, setActiveTab] = useState('dashboard');
 
   // Load initial configuration and agents
   useEffect(() => {
@@ -44,21 +45,41 @@ export default function Home() {
   // Handle WebSocket messages
   useWebSocket({
     onMessage: (data) => {
+      console.log('WebSocket message received:', data);
       if (data.type === 'agent_update') {
-        setAgents(prev => ({
-          ...prev,
-          [data.data.name]: data.data
-        }));
+        console.log('Updating agent status:', data.data);
+        setAgents(prev => {
+          const newAgents = {
+            ...prev,
+            [data.data.name]: {
+              ...prev[data.data.name],
+              ...data.data
+            }
+          };
+          console.log('New agents state:', newAgents);
+          return newAgents;
+        });
       }
     },
-    onStatusChange: setWsStatus
+    onStatusChange: (status) => {
+      console.log('WebSocket status changed:', status);
+      setWsStatus(status);
+    }
   });
 
   const handleAgentStatusChange = (updatedAgent: AgentState) => {
-    setAgents(prev => ({
-      ...prev,
-      [updatedAgent.name]: updatedAgent
-    }));
+    console.log('Agent status change handler called:', updatedAgent);
+    setAgents(prev => {
+      const newAgents = {
+        ...prev,
+        [updatedAgent.name]: {
+          ...prev[updatedAgent.name],
+          ...updatedAgent
+        }
+      };
+      console.log('New agents state after manual update:', newAgents);
+      return newAgents;
+    });
   };
 
   const handlePathChange = (newPath: string) => {
@@ -103,43 +124,23 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-slate-900 text-white p-8">
-      <div className="max-w-6xl mx-auto space-y-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold">Code Swarm</h1>
-            <div className="mt-2 flex items-center gap-2">
-              <span className="text-sm text-slate-400">
-                WebSocket:
-              </span>
-              <span className={`px-2 py-0.5 rounded-full text-xs font-medium
-                ${wsStatus === 'connected' ? 'bg-green-900/50 text-green-300' :
-                  wsStatus === 'connecting' ? 'bg-yellow-900/50 text-yellow-300' :
-                    wsStatus === 'error' ? 'bg-red-900/50 text-red-300' :
-                      'bg-slate-700 text-slate-300'}`}>
-                {wsStatus}
-              </span>
-            </div>
-          </div>
-          <MonitorPathSelector
-            currentPath={monitorPath}
+      <div className="max-w-6xl mx-auto space-y-6">
+        <TabNavigation
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+        />
+
+        {activeTab === 'dashboard' ? (
+          <Dashboard
+            agents={agents}
+            monitorPath={monitorPath}
+            wsStatus={wsStatus}
+            onAgentStatusChange={handleAgentStatusChange}
             onPathChange={handlePathChange}
           />
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {Object.entries(agents).map(([name, agent]) => (
-            <AgentCard
-              key={name}
-              agent={agent}
-              onStatusChange={handleAgentStatusChange}
-            />
-          ))}
-        </div>
-
-        <LogWindow
-          agents={Object.keys(agents)}
-          className="mt-8"
-        />
+        ) : (
+          <Settings />
+        )}
       </div>
     </main>
   );

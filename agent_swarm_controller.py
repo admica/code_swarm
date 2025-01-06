@@ -8,7 +8,7 @@ import sys
 import subprocess
 import logging
 import json
-from typing import Dict, Optional, List, Set
+from typing import Dict, Optional, List, Set, Any
 import psutil
 from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
@@ -306,49 +306,52 @@ class LLMService:
             )
 
 class ControllerInfo(BaseModel):
-    """General information about the controller state."""
-    version: str
+    """Information about the controller configuration and status."""
     monitor_path: Optional[str]
-    agents_status: Dict[str, AgentStatus]
-    llm_metrics: Dict
+    skip_list: List[str]
+    ollama_available: bool
+    ollama_model: Optional[str]
 
 class SwarmController:
     """Controls and monitors code_swarm agents."""
 
     def __init__(self):
         self.config = configparser.ConfigParser()
-        self.config_path = 'config.ini'
-        self.monitor_path = None
-        self._load_config()
+        self.config.read('config.ini')
         
+        self.monitor_path = self.config.get('swarm_controller', 'monitor_path', fallback=None)
+        self.skip_list = self.config.get('swarm_controller', 'skip_list', fallback='').split(',')
+        self.skip_list = [path.strip() for path in self.skip_list if path.strip()]
+        
+        # Initialize agents dictionary
         self.agents = {
-            "changelog": {
-                "script": "agent_code_mon_changelog.py",
-                "process": None,
-                "status": AgentStatus(
-                    name="changelog",
+            'changelog': {
+                'script': 'agent_code_mon_changelog.py',
+                'process': None,
+                'status': AgentStatus(
+                    name='changelog',
                     pid=None,
                     running=False,
                     monitor_path=None,
                     last_error=None
                 )
             },
-            "readme": {
-                "script": "agent_code_mon_readme.py",
-                "process": None,
-                "status": AgentStatus(
-                    name="readme",
+            'readme': {
+                'script': 'agent_code_mon_readme.py',
+                'process': None,
+                'status': AgentStatus(
+                    name='readme',
                     pid=None,
                     running=False,
                     monitor_path=None,
                     last_error=None
                 )
             },
-            "deps": {
-                "script": "agent_code_mon_deps.py",
-                "process": None,
-                "status": AgentStatus(
-                    name="deps",
+            'deps': {
+                'script': 'agent_code_mon_deps.py',
+                'process': None,
+                'status': AgentStatus(
+                    name='deps',
                     pid=None,
                     running=False,
                     monitor_path=None,
@@ -358,27 +361,45 @@ class SwarmController:
         }
         self.monitor_task = None
 
-    def _load_config(self) -> None:
-        """Load configuration from file."""
-        if not os.path.exists(self.config_path):
-            self._create_default_config()
-        
-        self.config.read(self.config_path)
-        self.monitor_path = self.config.get('swarm_controller', 'monitor_path', fallback=None)
+    async def get_info(self) -> ControllerInfo:
+        """Get controller information."""
+        ollama_status = await llm_service.get_status()
+        return ControllerInfo(
+            monitor_path=self.monitor_path,
+            skip_list=self.skip_list,
+            ollama_available=ollama_status.available,
+            ollama_model=ollama_status.model
+        )
 
-    def _create_default_config(self) -> None:
-        """Create default configuration."""
-        self.config['swarm_controller'] = {
-            'monitor_path': '',
-            'host': '0.0.0.0',
-            'port': '8000'
-        }
-        self._save_config()
+    def update_skip_list(self, skip_list: List[str]) -> Dict[str, Any]:
+        """Update the skip list configuration."""
+        try:
+            self.skip_list = skip_list
+            
+            # Update config file
+            if not self.config.has_section('swarm_controller'):
+                self.config.add_section('swarm_controller')
+            
+            self.config['swarm_controller']['skip_list'] = ','.join(skip_list)
+            
+            with open('config.ini', 'w') as configfile:
+                self.config.write(configfile)
+            
+            return {"success": True, "skip_list": skip_list}
+        except Exception as e:
+            logger.error(f"Error updating skip list: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to update skip list: {str(e)}"
+            )
 
-    def _save_config(self) -> None:
-        """Save current configuration to file."""
-        with open(self.config_path, 'w') as f:
-            self.config.write(f)
+    def should_skip_path(self, path: str) -> bool:
+        """Check if a path should be skipped based on the skip list."""
+        path = path.replace('\\', '/')  # Normalize path separators
+        return any(
+            skip_pattern in path
+            for skip_pattern in self.skip_list
+        )
 
     def set_monitor_path(self, path: str) -> Dict[str, str]:
         """Set and validate the monitoring path."""
@@ -419,15 +440,6 @@ class SwarmController:
         except Exception as e:
             return {"error": f"Failed to set monitor path: {str(e)}"}
 
-    def get_info(self) -> ControllerInfo:
-        """Get general controller information."""
-        return ControllerInfo(
-            version="1.0.0",
-            monitor_path=self.monitor_path,
-            agents_status=self.get_all_statuses(),
-            llm_metrics=llm_service.get_metrics()
-        )
-
     def start_agent(self, agent_name: str, path: Optional[str] = None) -> AgentStatus:
         """Start a specific agent."""
         if agent_name not in self.agents:
@@ -462,11 +474,17 @@ class SwarmController:
 
         try:
             logger.info(f"Starting agent {agent_name} with path: {monitor_path}")
-            logger.debug(f"Agent script: {agent['script']}")
+            
+            # Get the absolute path to the agent script
+            script_path = os.path.abspath(agent["script"])
+            if not os.path.exists(script_path):
+                raise ValueError(f"Agent script not found: {script_path}")
+                
+            logger.debug(f"Agent script path: {script_path}")
             
             # Start the agent process
             process = subprocess.Popen(
-                [sys.executable, agent["script"], monitor_path],
+                [sys.executable, script_path, monitor_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
@@ -732,7 +750,7 @@ async def set_monitor_path(path: str):
 @api_router.get("/info")
 async def get_controller_info():
     """Get general controller information."""
-    return controller.get_info()
+    return await controller.get_info()
 
 @api_router.get("/llm/metrics")
 async def get_llm_metrics():
@@ -919,6 +937,11 @@ async def analyze_dependencies(request: LLMRequest) -> LLMResponse:
                 logger.info(f"  {line}")
     
     return response
+
+@api_router.post("/config/skip-list")
+async def update_skip_list(skip_list: List[str]):
+    """Update the skip list configuration."""
+    return controller.update_skip_list(skip_list)
 
 # Include the API router
 app.include_router(api_router)
