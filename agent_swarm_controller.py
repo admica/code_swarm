@@ -8,9 +8,10 @@ import sys
 import subprocess
 import logging
 import json
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Set
 import psutil
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 from pathlib import Path
@@ -39,6 +40,15 @@ class AgentStatus(BaseModel):
     running: bool
     monitor_path: Optional[str]
     last_error: Optional[str]
+
+    def dict(self, *args, **kwargs):
+        return {
+            "name": self.name,
+            "pid": self.pid,
+            "running": self.running,
+            "monitor_path": self.monitor_path,
+            "last_error": self.last_error
+        }
 
 class LLMRequest(BaseModel):
     prompt: str
@@ -346,6 +356,7 @@ class SwarmController:
                 )
             }
         }
+        self.monitor_task = None
 
     def _load_config(self) -> None:
         """Load configuration from file."""
@@ -426,8 +437,22 @@ class SwarmController:
         # Use provided path or fall back to configured monitor_path
         monitor_path = path or self.monitor_path
         if not monitor_path:
-            logger.error("No monitor path configured. Set a path first.")
+            logger.error("No monitor path configured")
             raise ValueError("No monitor path configured. Set a path first.")
+
+        # Validate and create path if needed
+        try:
+            monitor_path = os.path.abspath(os.path.expanduser(monitor_path))
+            if not os.path.exists(monitor_path):
+                logger.info(f"Creating directory: {monitor_path}")
+                os.makedirs(monitor_path)
+            elif not os.path.isdir(monitor_path):
+                raise ValueError(f"Path exists but is not a directory: {monitor_path}")
+            elif not os.access(monitor_path, os.R_OK | os.W_OK):
+                raise ValueError(f"Insufficient permissions for directory: {monitor_path}")
+        except Exception as e:
+            logger.error(f"Error validating path {monitor_path}: {e}")
+            raise ValueError(f"Invalid monitor path: {str(e)}")
 
         agent = self.agents[agent_name]
         
@@ -454,6 +479,8 @@ class SwarmController:
                 logger.error(f"Agent {agent_name} failed to start")
                 logger.error(f"stdout: {stdout}")
                 logger.error(f"stderr: {stderr}")
+                agent["status"].last_error = stderr or "Failed to start"
+                agent["status"].running = False
                 raise Exception(f"Agent failed to start: {stderr}")
             
             agent["process"] = process
@@ -504,6 +531,7 @@ class SwarmController:
                 agent["process"] = None
                 agent["status"].pid = None
                 agent["status"].running = False
+                agent["status"].last_error = None
                 
             except psutil.NoSuchProcess:
                 logger.warning(f"Process for agent {agent_name} no longer exists")
@@ -579,14 +607,61 @@ class SwarmController:
             logger.error(f"Error reading logs for {agent_name}: {e}")
             return []
 
+    async def _monitor_agents(self):
+        """Monitor agent processes and update their status."""
+        while True:
+            for agent_name, agent in self.agents.items():
+                if agent["process"]:
+                    try:
+                        process = psutil.Process(agent["process"].pid)
+                        running = process.is_running()
+                        if running != agent["status"].running:
+                            agent["status"].running = running
+                            if not running:
+                                agent["status"].pid = None
+                                agent["process"] = None
+                            # Broadcast status change
+                            await manager.broadcast({
+                                "type": "agent_update",
+                                "data": agent["status"].dict()
+                            })
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        if agent["status"].running:
+                            agent["status"].running = False
+                            agent["status"].pid = None
+                            agent["process"] = None
+                            # Broadcast status change
+                            await manager.broadcast({
+                                "type": "agent_update",
+                                "data": agent["status"].dict()
+                            })
+            await asyncio.sleep(1)  # Check every second
+
+    async def start_monitoring(self):
+        """Start the agent monitoring task."""
+        if not self.monitor_task:
+            self.monitor_task = asyncio.create_task(self._monitor_agents())
+
+    async def stop_monitoring(self):
+        """Stop the agent monitoring task."""
+        if self.monitor_task:
+            self.monitor_task.cancel()
+            try:
+                await self.monitor_task
+            except asyncio.CancelledError:
+                pass
+            self.monitor_task = None
+
 # Initialize FastAPI app and services
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
     # Startup
     await llm_service.start()
+    await controller.start_monitoring()
     yield
     # Shutdown
+    await controller.stop_monitoring()
     await llm_service.stop()
 
 app = FastAPI(
@@ -594,22 +669,177 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # Your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Create API router
+api_router = APIRouter(prefix="/api")
+
 controller = SwarmController()
 llm_service = LLMService()
 
-# Configuration endpoints
-@app.post("/config/monitor-path")
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Set[WebSocket] = set()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.add(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                logger.error(f"Error broadcasting to WebSocket: {e}")
+                # Remove failed connections
+                self.active_connections.remove(connection)
+
+manager = ConnectionManager()
+
+# Move WebSocket endpoint to root level (not under /api)
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Wait for messages but primarily use this for sending updates
+            data = await websocket.receive_text()
+            # You can handle incoming messages here if needed
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        manager.disconnect(websocket)
+
+# Move all endpoints to API router
+@api_router.post("/config/monitor-path")
 async def set_monitor_path(path: str):
     """Set the directory path to monitor."""
     return controller.set_monitor_path(path)
 
-@app.get("/info")
+@api_router.get("/info")
 async def get_controller_info():
     """Get general controller information."""
     return controller.get_info()
 
+@api_router.get("/llm/metrics")
+async def get_llm_metrics():
+    """Get LLM usage metrics."""
+    return llm_service.get_metrics()
+
+@api_router.post("/agents/{agent_name}/start")
+async def start_agent(agent_name: str, path: str = None):
+    """Start a specific agent.
+    
+    Args:
+        agent_name: Name of the agent to start
+        path: Path to monitor. Required if no default path is configured.
+    """
+    try:
+        if not path and not controller.monitor_path:
+            raise HTTPException(
+                status_code=400,
+                detail="Path parameter is required when no default path is configured"
+            )
+        
+        status = controller.start_agent(agent_name, path)
+        await manager.broadcast({
+            "type": "agent_update",
+            "data": status.dict()
+        })
+        return status
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/agents/{agent_name}/stop")
+async def stop_agent(agent_name: str):
+    """Stop a specific agent."""
+    try:
+        status = controller.stop_agent(agent_name)
+        await manager.broadcast({
+            "type": "agent_update",
+            "data": status.dict()
+        })
+        return status
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/agents/{agent_name}/status")
+async def get_agent_status(agent_name: str):
+    """Get status of a specific agent."""
+    try:
+        return controller.get_agent_status(agent_name)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/agents/{agent_name}/logs")
+async def get_agent_logs(agent_name: str, lines: int = 100):
+    """Get recent logs for a specific agent."""
+    try:
+        return controller.read_agent_logs(agent_name, lines)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/agents")
+async def get_all_statuses():
+    """Get status of all agents."""
+    return controller.get_all_statuses()
+
+@api_router.post("/agents/start-all")
+async def start_all_agents(path: str = None):
+    """Start all agents. Uses configured monitor_path if no path provided."""
+    actual_path = path if path is not None else controller.monitor_path
+    if actual_path is None:
+        raise HTTPException(status_code=400, detail="No monitor path configured")
+    
+    statuses = controller.start_all(actual_path)
+    for agent_name, status in statuses.items():
+        await manager.broadcast({
+            "type": "agent_update",
+            "data": status.dict()
+        })
+    return statuses
+
+@api_router.post("/agents/stop-all")
+async def stop_all_agents():
+    """Stop all agents."""
+    statuses = controller.stop_all()
+    for agent_name, status in statuses.items():
+        await manager.broadcast({
+            "type": "agent_update",
+            "data": status.dict()
+        })
+    return statuses
+
+@api_router.get("/llm/status")
+async def get_llm_status():
+    """Get current LLM service status."""
+    return await llm_service.get_status()
+
+@api_router.get("/llm/health")
+async def check_llm_health():
+    """Quick health check for LLM service."""
+    status = await llm_service.get_status()
+    if not status.available:
+        raise HTTPException(status_code=503, detail=status.error or "LLM service unavailable")
+    return {"status": "healthy", "response_time": status.response_time}
+
 # Add LLM endpoints
-@app.post("/llm/readme/generate")
+@api_router.post("/llm/readme/generate")
 async def generate_readme_content(request: LLMRequest) -> LLMResponse:
     """Generate content for README files."""
     logger.info(f"Received README generation request from agent: {request.agent}")
@@ -636,7 +866,7 @@ async def generate_readme_content(request: LLMRequest) -> LLMResponse:
     
     return response
 
-@app.post("/llm/changelog/generate")
+@api_router.post("/llm/changelog/generate")
 async def generate_changelog_content(request: LLMRequest) -> LLMResponse:
     """Generate content for changelog entries."""
     logger.info(f"Received changelog generation request from agent: {request.agent}")
@@ -663,7 +893,7 @@ async def generate_changelog_content(request: LLMRequest) -> LLMResponse:
     
     return response
 
-@app.post("/llm/deps/analyze")
+@api_router.post("/llm/deps/analyze")
 async def analyze_dependencies(request: LLMRequest) -> LLMResponse:
     """Analyze code dependencies using LLM."""
     logger.info(f"Received dependency analysis request from agent: {request.agent}")
@@ -690,74 +920,8 @@ async def analyze_dependencies(request: LLMRequest) -> LLMResponse:
     
     return response
 
-@app.get("/llm/metrics")
-async def get_llm_metrics():
-    """Get LLM usage metrics."""
-    return llm_service.get_metrics()
-
-@app.post("/agents/{agent_name}/start")
-async def start_agent(agent_name: str, path: str):
-    """Start a specific agent."""
-    try:
-        return controller.start_agent(agent_name, path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/agents/{agent_name}/stop")
-async def stop_agent(agent_name: str):
-    """Stop a specific agent."""
-    try:
-        return controller.stop_agent(agent_name)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/agents/{agent_name}/status")
-async def get_agent_status(agent_name: str):
-    """Get status of a specific agent."""
-    try:
-        return controller.get_agent_status(agent_name)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/agents/{agent_name}/logs")
-async def get_agent_logs(agent_name: str, lines: int = 100):
-    """Get recent logs for a specific agent."""
-    try:
-        return controller.read_agent_logs(agent_name, lines)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/agents")
-async def get_all_statuses():
-    """Get status of all agents."""
-    return controller.get_all_statuses()
-
-@app.post("/agents/start-all")
-async def start_all_agents(path: str = None):
-    """Start all agents. Uses configured monitor_path if no path provided."""
-    actual_path = path if path is not None else controller.monitor_path
-    if actual_path is None:
-        raise HTTPException(status_code=400, detail="No monitor path configured")
-    return controller.start_all(actual_path)
-
-@app.post("/agents/stop-all")
-async def stop_all_agents():
-    """Stop all agents."""
-    return controller.stop_all()
-
-# Add new LLM endpoints
-@app.get("/llm/status")
-async def get_llm_status():
-    """Get current LLM service status."""
-    return await llm_service.get_status()
-
-@app.get("/llm/health")
-async def check_llm_health():
-    """Quick health check for LLM service."""
-    status = await llm_service.get_status()
-    if not status.available:
-        raise HTTPException(status_code=503, detail=status.error or "LLM service unavailable")
-    return {"status": "healthy", "response_time": status.response_time}
+# Include the API router
+app.include_router(api_router)
 
 def main():
     """Main entry point for the swarm controller."""

@@ -1,36 +1,87 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Code Swarm Frontend
 
-## Getting Started
+A modern web interface for monitoring and managing AI-powered programming agents.
 
-First, run the development server:
+## Overview
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+This frontend application provides a real-time dashboard for visualizing and interacting with Code Swarm's Python agents:
+
+- **Changelog Agent**: Monitor file changes and view automated code analysis
+- **README Agent**: Track documentation updates and AI-generated summaries
+- **Dependency Agent**: Visualize project dependencies through interactive graphs
+
+## Tech Stack
+
+- **Framework**: Next.js 14 with App Router
+- **Language**: TypeScript
+- **Styling**: 
+  - Tailwind CSS for utility-first styling
+  - shadcn/ui for component primitives
+- **Data Fetching**: 
+  - SWR for real-time data and caching
+  - Axios for API requests
+- **Visualization**:
+  - Mermaid.js for dependency graphs
+  - React components for real-time monitoring
+
+## Project Structure
+
+```
+src/
+├── app/              # Next.js app router pages
+├── components/       # React components
+│   ├── agents/      # Agent monitoring components
+│   ├── changelog/   # Changelog visualization
+│   ├── readme/      # README display components
+│   ├── dependencies/# Dependency graph components
+│   └── ui/          # Reusable UI components
+├── types/           # TypeScript types
+│   ├── agents/      # Agent-related types
+│   └── api/         # API response types
+└── lib/             # Utilities and helpers
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Features
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- Real-time agent status monitoring
+- Live code change visualization
+- Interactive dependency graphs
+- Documentation updates tracking
+- Dark mode support
+- Responsive design
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Development
 
-## Learn More
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
 
-To learn more about Next.js, take a look at the following resources:
+2. Run development server:
+   ```bash
+   npm run dev
+   ```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+3. Build for production:
+   ```bash
+   npm run build
+   ```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## API Integration
 
-## Deploy on Vercel
+The frontend communicates with Python agents through a REST API, featuring:
+- WebSocket connections for real-time updates
+- Endpoint-specific data fetching with SWR
+- Automatic error handling and retries
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Contributing
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. Fork the repository
+2. Create your feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
+
+## License
+
+[Add your license here]

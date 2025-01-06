@@ -98,9 +98,12 @@ class CodeAnalyzer:
         try:
             self.repo = git.Repo(repo_path)
             logger.info(f"Successfully initialized Git repository at {repo_path}")
-        except git.exc.InvalidGitRepositoryError as e:
-            logger.error(f"Invalid Git repository at {repo_path}")
-            raise
+        except git.exc.InvalidGitRepositoryError:
+            logger.warning(f"Path {repo_path} is not a Git repository. Git features will be disabled.")
+            self.repo = None
+        except git.exc.NoSuchPathError:
+            logger.error(f"Path {repo_path} does not exist")
+            raise ValueError(f"Directory does not exist: {repo_path}")
 
         self.enabled_features = set(self.config.get('enabled_features', '').split(','))
         self.controller_url = self.config.get('controller_url', 'http://localhost:8000')
@@ -115,6 +118,9 @@ class CodeAnalyzer:
         Returns:
             Content of the file from last Git commit or empty string if no commits
         """
+        if not self.repo:
+            return ""
+            
         try:
             if not self.repo.head.is_valid():
                 logger.info(f"No commits yet in repository for {file_path}")
