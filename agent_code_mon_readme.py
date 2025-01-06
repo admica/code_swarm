@@ -49,8 +49,8 @@ class ConfigManager:
     def create_default_config(self) -> None:
         """Create default configuration file."""
         self.config['agent_code_mon_readme'] = {
-            'ollama_model': 'codellama',
-            'ollama_url': 'http://localhost:11434/api/generate',
+            'ollama_model': 'llama3.2',
+            'controller_url': 'http://localhost:8000',
             'watch_patterns': '*.py',
             'ignore_patterns': '__pycache__/*,.*,test_*',
             'readme_sections': 'overview,functions,classes,dependencies,usage',
@@ -69,8 +69,8 @@ class PythonCodeAnalyzer:
     def __init__(self, config: Dict[str, str]):
         """Initialize the analyzer with configuration."""
         self.config = config
-        self.ollama_url = config.get('ollama_url')
-        self.ollama_model = config.get('ollama_model')
+        self.controller_url = config.get('controller_url', 'http://localhost:8000')
+        self.ollama_model = config.get('ollama_model', 'llama3.2')
 
     def extract_docstring(self, node: ast.AST) -> str:
         """Extract docstring from an AST node."""
@@ -138,15 +138,8 @@ class PythonCodeAnalyzer:
             return {}
 
     def get_ai_summary(self, content: str, old_readme: Optional[str] = None) -> Optional[str]:
-        """Get AI-generated summary of the code changes."""
+        """Get AI-generated summary of the code changes using the controller's LLM service."""
         try:
-            # Check if Ollama is available
-            try:
-                requests.get(self.ollama_url.rsplit('/', 1)[0], timeout=1)
-            except requests.exceptions.RequestException:
-                logger.warning("Ollama service not available, skipping AI summary")
-                return None
-                
             context = f"Previous README:\n{old_readme}\n\n" if old_readme else ""
             prompt = f"""{context}Analyze this Python code and provide a clear, comprehensive overview:
 
@@ -161,24 +154,30 @@ Focus on:
 Keep the response under 200 words and maintain consistency with any existing documentation."""
 
             response = requests.post(
-                self.ollama_url,
+                f"{self.controller_url}/llm/readme/generate",
                 json={
-                    "model": self.ollama_model,
                     "prompt": prompt,
-                    "stream": False
+                    "model": self.ollama_model,
+                    "agent": "readme"
                 },
                 timeout=30
             )
             
             if response.status_code == 404:
-                logger.warning("Ollama endpoint not found, skipping AI summary")
+                logger.warning("Controller LLM endpoint not found")
                 return None
                 
             response.raise_for_status()
-            return response.json().get('response', 'No summary available')
+            result = response.json()
+            
+            if result.get('error'):
+                logger.warning(f"LLM error: {result['error']}")
+                return None
+                
+            return result.get('response')
             
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Ollama service error: {e}")
+            logger.warning(f"Controller service error: {e}")
             return None
         except Exception as e:
             logger.error(f"Error getting AI summary: {e}")
@@ -190,19 +189,6 @@ class ReadmeGenerator:
     def __init__(self, analyzer: PythonCodeAnalyzer):
         """Initialize the generator with a code analyzer."""
         self.analyzer = analyzer
-
-    def generate_function_section(self, functions: List[Dict]) -> str:
-        """Generate documentation for functions."""
-        if not functions:
-            return ""
-            
-        section = "\n## Functions\n\n"
-        for func in functions:
-            args_str = ", ".join(func['args'])
-            section += f"### `{func['name']}({args_str})`\n\n"
-            if func['docstring']:
-                section += f"{func['docstring'].strip()}\n\n"
-        return section
 
     def generate_class_section(self, classes: List[Dict]) -> str:
         """Generate documentation for classes."""
@@ -226,17 +212,6 @@ class ReadmeGenerator:
                 section += "\n"
         return section
 
-    def generate_dependencies_section(self, imports: List[str]) -> str:
-        """Generate documentation for dependencies."""
-        if not imports:
-            return ""
-            
-        section = "\n## Dependencies\n\n"
-        unique_imports = sorted(set(imports))
-        for imp in unique_imports:
-            section += f"- {imp}\n"
-        return section
-
     def generate_readme(self, file_path: str, content: str) -> str:
         """Generate a complete README.md for a Python file."""
         old_readme = None
@@ -249,24 +224,24 @@ class ReadmeGenerator:
         # Analyze the code
         info = self.analyzer.analyze_code(content)
         
-        # Get AI summary
+        # Get AI summary for overview
         ai_summary = self.analyzer.get_ai_summary(content, old_readme)
         
         # Generate README sections
         readme = f"# {os.path.basename(file_path)}\n\n"
         
-        # Overview section
-        if info.get('docstring') or ai_summary:
-            readme += "## Overview\n\n"
-            if info.get('docstring'):
-                readme += f"{info['docstring'].strip()}\n\n"
-            if ai_summary:
-                readme += f"{ai_summary.strip()}\n\n"
+        # Overview section - focus on plain English description
+        readme += "## Overview\n\n"
+        if info.get('docstring'):
+            readme += f"{info['docstring'].strip()}\n\n"
+        if ai_summary:
+            # Extract just the main purpose and functionality from AI summary
+            summary_lines = ai_summary.strip().split('\n')
+            overview_lines = [line for line in summary_lines if not line.startswith(('-', '•', '*', '1.', '2.', '3.', '4.'))]
+            readme += '\n'.join(overview_lines).strip() + '\n\n'
         
-        # Add other sections
-        readme += self.generate_function_section(info.get('functions', []))
+        # Add classes section (keeping as is since it's well-liked)
         readme += self.generate_class_section(info.get('classes', []))
-        readme += self.generate_dependencies_section(info.get('imports', []))
         
         return readme
 
@@ -291,6 +266,28 @@ class PyFileHandler(FileSystemEventHandler):
         """Initialize with a README generator."""
         self.generator = generator
         logger.info("File handler initialized")
+
+    def process_existing_files(self, path: str) -> None:
+        """Process all existing Python files in the directory that don't have READMEs."""
+        for root, _, files in os.walk(path):
+            for file in files:
+                if not file.endswith('.py'):
+                    continue
+                    
+                file_path = os.path.join(root, file)
+                readme_path = f"{file_path}_README.md"
+                
+                if os.path.exists(readme_path):
+                    continue
+                    
+                logger.info(f"Processing existing file: {file_path}")
+                try:
+                    with open(file_path, 'r') as f:
+                        content = f.read()
+                    
+                    self.generator.update_readme(file_path, content)
+                except Exception as e:
+                    logger.error(f"Error processing existing file {file_path}: {e}")
 
     def on_modified(self, event) -> None:
         """Handle file modification events."""
@@ -325,6 +322,10 @@ def main(path: str) -> None:
         analyzer = PythonCodeAnalyzer(config)
         generator = ReadmeGenerator(analyzer)
         event_handler = PyFileHandler(generator)
+        
+        # Process existing files before starting the watcher
+        logger.info("Processing existing Python files...")
+        event_handler.process_existing_files(path)
         
         observer = Observer()
         observer.schedule(event_handler, path, recursive=True)
