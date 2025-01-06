@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
 import importlib.util
 import re
+import requests
 
 # Set up logging
 logging.basicConfig(
@@ -55,7 +56,10 @@ class ConfigManager:
             'max_depth': '5',  # Maximum directory depth to search
             'group_by_directory': 'true',
             'include_external_deps': 'false',
-            'diagram_direction': 'TD'  # TB (top-bottom), LR (left-right), etc.
+            'diagram_direction': 'TD',  # TB (top-bottom), LR (left-right), etc.
+            'ollama_model': 'llama3.2',
+            'controller_url': 'http://localhost:8000',
+            'enable_ai_analysis': 'true'
         }
 
         with open(self.config_path, 'w') as f:
@@ -79,6 +83,9 @@ class DependencyAnalyzer:
         self.group_by_directory = config.get('group_by_directory', 'true').lower() == 'true'
         self.include_external_deps = config.get('include_external_deps', 'false').lower() == 'true'
         self.diagram_direction = config.get('diagram_direction', 'TD')
+        self.enable_ai_analysis = config.get('enable_ai_analysis', 'true').lower() == 'true'
+        self.controller_url = config.get('controller_url', 'http://localhost:8000')
+        self.ollama_model = config.get('ollama_model', 'llama3.2')
 
         # Cache for analyzed files
         self.file_cache: Dict[str, Dict] = {}
@@ -382,6 +389,105 @@ class DependencyAnalyzer:
 
         return mermaid
 
+    def get_ai_insights(self, dependencies: Dict[str, List[str]]) -> Optional[str]:
+        """Get AI insights about the project's dependency structure.
+        
+        Args:
+            dependencies: Dictionary of file dependencies
+            
+        Returns:
+            AI analysis text or None if disabled or service unavailable
+        """
+        if not self.enable_ai_analysis:
+            return None
+
+        try:
+            # First check if controller is available
+            try:
+                requests.get(f"{self.controller_url}/llm/health", timeout=1)
+            except requests.exceptions.RequestException:
+                logger.warning("Controller service not available, skipping AI analysis")
+                return None
+
+            # Build a structural analysis of the dependency graph
+            analysis = {
+                "total_files": len(dependencies),
+                "files_with_deps": len([f for f in dependencies.values() if f]),
+                "max_deps": max(len(deps) for deps in dependencies.values()),
+                "circular_deps": [],
+                "highly_coupled": []
+            }
+
+            # Find circular dependencies
+            for file_path, deps in dependencies.items():
+                for dep in deps:
+                    if file_path in dependencies.get(dep, []):
+                        pair = tuple(sorted([
+                            os.path.relpath(file_path, self.root_path),
+                            os.path.relpath(dep, self.root_path)
+                        ]))
+                        if pair not in analysis["circular_deps"]:
+                            analysis["circular_deps"].append(pair)
+
+            # Find highly coupled files (many dependencies)
+            threshold = analysis["max_deps"] * 0.7  # 70% of max as threshold
+            for file_path, deps in dependencies.items():
+                if len(deps) >= threshold:
+                    analysis["highly_coupled"].append({
+                        "file": os.path.relpath(file_path, self.root_path),
+                        "dep_count": len(deps)
+                    })
+
+            # Create the prompt
+            prompt = f"""Analyze this Python project's dependency structure:
+
+Project Statistics:
+- Total Python files: {analysis['total_files']}
+- Files with dependencies: {analysis['files_with_deps']}
+- Maximum dependencies for a single file: {analysis['max_deps']}
+
+{f'''Circular Dependencies Found:
+{chr(10).join(f"- {a} <-> {b}" for a, b in analysis['circular_deps'])}''' if analysis['circular_deps'] else 'No circular dependencies found.'}
+
+{f'''Highly Coupled Files:
+{chr(10).join(f"- {f['file']} ({f['dep_count']} dependencies)" for f in analysis['highly_coupled'])}''' if analysis['highly_coupled'] else 'No highly coupled files found.'}
+
+Please provide:
+1. An assessment of the project's modularity
+2. Potential issues or anti-patterns in the dependency structure
+3. Specific recommendations for improvement
+Keep the response under 200 words."""
+
+            response = requests.post(
+                f"{self.controller_url}/llm/deps/analyze",
+                json={
+                    "prompt": prompt,
+                    "model": self.ollama_model,
+                    "agent": "deps"
+                },
+                timeout=30
+            )
+
+            if response.status_code == 404:
+                logger.warning("Controller LLM endpoint not found, skipping AI analysis")
+                return None
+
+            response.raise_for_status()
+            result = response.json()
+            
+            if result.get('error'):
+                logger.warning(f"LLM error: {result['error']}")
+                return None
+                
+            return result.get('response')
+            
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Controller service error: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in AI analysis: {e}")
+            return None
+
 class DependencyVisualizer:
     """Generates and maintains dependency visualizations."""
 
@@ -397,10 +503,20 @@ class DependencyVisualizer:
             # Generate Mermaid diagram
             mermaid = self.analyzer.generate_mermaid(dependencies)
 
+            # Get AI insights
+            ai_insights = self.analyzer.get_ai_insights(dependencies)
+
             # Create visualization file
             vis_path = os.path.join(self.analyzer.root_path, 'dependency_graph.md')
             with open(vis_path, 'w') as f:
                 f.write("# Project Dependency Graph\n\n")
+                
+                if ai_insights:
+                    f.write("## AI Analysis\n\n")
+                    f.write(ai_insights)
+                    f.write("\n\n")
+                
+                f.write("## Visualization\n\n")
                 f.write("```mermaid\n")
                 f.write(mermaid)
                 f.write("\n```\n\n")

@@ -420,20 +420,25 @@ class SwarmController:
     def start_agent(self, agent_name: str, path: Optional[str] = None) -> AgentStatus:
         """Start a specific agent."""
         if agent_name not in self.agents:
+            logger.error(f"Unknown agent: {agent_name}")
             raise ValueError(f"Unknown agent: {agent_name}")
 
         # Use provided path or fall back to configured monitor_path
         monitor_path = path or self.monitor_path
         if not monitor_path:
+            logger.error("No monitor path configured. Set a path first.")
             raise ValueError("No monitor path configured. Set a path first.")
 
         agent = self.agents[agent_name]
         
         if agent["process"] and agent["process"].poll() is None:
-            logger.warning(f"Agent {agent_name} is already running")
+            logger.warning(f"Agent {agent_name} is already running with PID {agent['process'].pid}")
             return agent["status"]
 
         try:
+            logger.info(f"Starting agent {agent_name} with path: {monitor_path}")
+            logger.debug(f"Agent script: {agent['script']}")
+            
             # Start the agent process
             process = subprocess.Popen(
                 [sys.executable, agent["script"], monitor_path],
@@ -442,13 +447,22 @@ class SwarmController:
                 text=True
             )
             
+            # Wait a moment to check if process started successfully
+            time.sleep(0.5)
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                logger.error(f"Agent {agent_name} failed to start")
+                logger.error(f"stdout: {stdout}")
+                logger.error(f"stderr: {stderr}")
+                raise Exception(f"Agent failed to start: {stderr}")
+            
             agent["process"] = process
             agent["status"].pid = process.pid
             agent["status"].running = True
             agent["status"].monitor_path = monitor_path
             agent["status"].last_error = None
             
-            logger.info(f"Started agent {agent_name} with PID {process.pid}")
+            logger.info(f"Successfully started agent {agent_name} with PID {process.pid}")
             return agent["status"]
             
         except Exception as e:
@@ -461,24 +475,41 @@ class SwarmController:
     def stop_agent(self, agent_name: str) -> AgentStatus:
         """Stop a specific agent."""
         if agent_name not in self.agents:
+            logger.error(f"Unknown agent: {agent_name}")
             raise ValueError(f"Unknown agent: {agent_name}")
 
         agent = self.agents[agent_name]
+        logger.info(f"Attempting to stop agent {agent_name}")
         
         if agent["process"]:
             try:
+                logger.debug(f"Found process for {agent_name} with PID {agent['process'].pid}")
                 process = psutil.Process(agent["process"].pid)
-                for child in process.children(recursive=True):
+                
+                # Log children processes before termination
+                children = process.children(recursive=True)
+                if children:
+                    logger.debug(f"Found {len(children)} child processes to terminate")
+                
+                for child in children:
+                    logger.debug(f"Terminating child process {child.pid}")
                     child.terminate()
+                
+                logger.debug(f"Terminating main process {process.pid}")
                 process.terminate()
+                
                 process.wait(timeout=5)
+                logger.info(f"Successfully stopped agent {agent_name}")
                 
                 agent["process"] = None
                 agent["status"].pid = None
                 agent["status"].running = False
                 
-                logger.info(f"Stopped agent {agent_name}")
-                
+            except psutil.NoSuchProcess:
+                logger.warning(f"Process for agent {agent_name} no longer exists")
+                agent["process"] = None
+                agent["status"].pid = None
+                agent["status"].running = False
             except Exception as e:
                 error_msg = str(e)
                 logger.error(f"Error stopping agent {agent_name}: {error_msg}")
@@ -590,6 +621,60 @@ async def generate_readme_content(request: LLMRequest) -> LLMResponse:
             
     if request.agent != "readme":
         logger.error(f"Invalid agent tried to use readme endpoint: {request.agent}")
+        raise HTTPException(status_code=400, detail="Invalid agent for this endpoint")
+        
+    logger.info("Submitting request to LLM service")
+    response = await llm_service.submit_request(request)
+    
+    if response.error:
+        logger.error(f"LLM error response: {response.error}")
+    else:
+        logger.info("LLM response content:")
+        for line in response.response.split('\n'):
+            if line.strip():
+                logger.info(f"  {line}")
+    
+    return response
+
+@app.post("/llm/changelog/generate")
+async def generate_changelog_content(request: LLMRequest) -> LLMResponse:
+    """Generate content for changelog entries."""
+    logger.info(f"Received changelog generation request from agent: {request.agent}")
+    logger.info(f"Request details: model={request.model}, max_tokens={request.max_tokens}, temperature={request.temperature}")
+    logger.info("Prompt content:")
+    for line in request.prompt.split('\n'):
+        if line.strip():
+            logger.info(f"  {line[:100]}..." if len(line) > 100 else f"  {line}")
+            
+    if request.agent != "changelog":
+        logger.error(f"Invalid agent tried to use changelog endpoint: {request.agent}")
+        raise HTTPException(status_code=400, detail="Invalid agent for this endpoint")
+        
+    logger.info("Submitting request to LLM service")
+    response = await llm_service.submit_request(request)
+    
+    if response.error:
+        logger.error(f"LLM error response: {response.error}")
+    else:
+        logger.info("LLM response content:")
+        for line in response.response.split('\n'):
+            if line.strip():
+                logger.info(f"  {line}")
+    
+    return response
+
+@app.post("/llm/deps/analyze")
+async def analyze_dependencies(request: LLMRequest) -> LLMResponse:
+    """Analyze code dependencies using LLM."""
+    logger.info(f"Received dependency analysis request from agent: {request.agent}")
+    logger.info(f"Request details: model={request.model}, max_tokens={request.max_tokens}, temperature={request.temperature}")
+    logger.info("Prompt content:")
+    for line in request.prompt.split('\n'):
+        if line.strip():
+            logger.info(f"  {line[:100]}..." if len(line) > 100 else f"  {line}")
+            
+    if request.agent != "deps":
+        logger.error(f"Invalid agent tried to use deps endpoint: {request.agent}")
         raise HTTPException(status_code=400, detail="Invalid agent for this endpoint")
         
     logger.info("Submitting request to LLM service")

@@ -103,8 +103,8 @@ class CodeAnalyzer:
             raise
 
         self.enabled_features = set(self.config.get('enabled_features', '').split(','))
-        self.ollama_url = self.config.get('ollama_url')
-        self.ollama_model = self.config.get('ollama_model')
+        self.controller_url = self.config.get('controller_url', 'http://localhost:8000')
+        self.ollama_model = self.config.get('ollama_model', 'llama3.2')
 
     def get_file_from_git(self, file_path: str) -> str:
         """Get the last committed version of the file from Git.
@@ -264,24 +264,24 @@ class CodeAnalyzer:
             return 0.0
 
     def get_ai_analysis(self, old_content: str, new_content: str) -> Optional[str]:
-        """Get AI analysis of changes using Ollama.
+        """Get AI analysis of changes using the controller's LLM service.
 
         Args:
             old_content: Previous version of the code
             new_content: New version of the code
 
         Returns:
-            AI analysis text or None if feature disabled or Ollama not available
+            AI analysis text or None if feature disabled or service not available
         """
         if 'ai_analysis' not in self.enabled_features:
             return None
 
         try:
-            # First check if Ollama is available
+            # First check if controller is available
             try:
-                requests.get(self.ollama_url.rsplit('/', 1)[0], timeout=1)
+                requests.get(f"{self.controller_url}/llm/health", timeout=1)
             except requests.exceptions.RequestException:
-                logger.warning("Ollama service not available, skipping AI analysis")
+                logger.warning("Controller service not available, skipping AI analysis")
                 return None
 
             prompt = f"""Compare these two versions of Python code and provide a brief analysis:
@@ -296,23 +296,30 @@ Please describe the main changes, their potential impact, and any suggestions fo
 Keep the response under 200 words."""
 
             response = requests.post(
-                self.ollama_url,
+                f"{self.controller_url}/llm/changelog/generate",
                 json={
-                    "model": self.ollama_model,
                     "prompt": prompt,
-                    "stream": False
+                    "model": self.ollama_model,
+                    "agent": "changelog"
                 },
                 timeout=30
             )
 
             if response.status_code == 404:
-                logger.warning("Ollama endpoint not found, skipping AI analysis")
+                logger.warning("Controller LLM endpoint not found, skipping AI analysis")
                 return None
 
             response.raise_for_status()
-            return response.json().get('response', 'No analysis available')
+            result = response.json()
+            
+            if result.get('error'):
+                logger.warning(f"LLM error: {result['error']}")
+                return None
+                
+            return result.get('response')
+            
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Ollama service error: {e}")
+            logger.warning(f"Controller service error: {e}")
             return None
         except Exception as e:
             logger.error(f"Unexpected error in AI analysis: {e}")
@@ -367,23 +374,28 @@ class PyFileHandler(FileSystemEventHandler):
             event: FileSystemEvent object
         """
         if event.is_directory:
+            logger.debug(f"Ignoring directory modification: {event.src_path}")
             return
 
         file_path = event.src_path
         if not file_path.endswith('.py'):
+            logger.debug(f"Ignoring non-Python file: {file_path}")
             return
 
         logger.info(f"Detected modification to {file_path}")
 
         try:
+            logger.debug("Reading current file content")
             with open(file_path, 'r') as f:
                 new_content = f.read()
 
+            logger.debug("Getting previous version from Git")
             old_content = self.analyzer.get_file_from_git(
                 os.path.relpath(file_path, self.analyzer.repo_path)
             )
 
             # Calculate scores
+            logger.debug("Calculating analysis scores")
             scores: Dict[str, Optional[float]] = {
                 'syntax': self.analyzer.calculate_syntax_score(new_content),
                 'style': self.analyzer.calculate_style_consistency(file_path, new_content),
@@ -391,8 +403,15 @@ class PyFileHandler(FileSystemEventHandler):
                 'standards': self.analyzer.run_pylint_analysis(new_content)
             }
 
+            logger.debug(f"Analysis scores: {scores}")
+
             # Get AI analysis
+            logger.debug("Getting AI analysis")
             ai_analysis = self.analyzer.get_ai_analysis(old_content, new_content)
+            if ai_analysis:
+                logger.debug("AI analysis received")
+            else:
+                logger.debug("No AI analysis available")
 
             # Prepare analysis summary
             summary = f"""Code Analysis Results for {os.path.basename(file_path)}:"""
@@ -405,12 +424,16 @@ class PyFileHandler(FileSystemEventHandler):
                 summary += f"\n\nAI Analysis:\n{ai_analysis}"
 
             logger.info(f"Completed analysis of {file_path}")
+            logger.debug(f"Analysis summary:\n{summary}")
 
             # Update changelog
+            logger.debug("Updating changelog")
             self.analyzer.update_changelog(file_path, summary)
+            logger.info("Changelog updated successfully")
 
         except Exception as e:
             logger.error(f"Error processing file {file_path}: {e}")
+            logger.exception("Full traceback:")
 
 def main(path: str) -> None:
     """Main function to run the code monitoring agent.
@@ -419,16 +442,29 @@ def main(path: str) -> None:
         path: Directory path to monitor
     """
     try:
+        logger.info("Starting changelog agent")
+        logger.info(f"Monitoring path: {path}")
+        
+        logger.debug("Loading configuration")
         config_manager = ConfigManager()
         config = config_manager.get_config()
+        logger.debug(f"Configuration loaded: {config}")
 
+        logger.debug("Initializing code analyzer")
         analyzer = CodeAnalyzer(path, config)
+        
+        logger.debug("Setting up file handler")
         event_handler = PyFileHandler(analyzer)
+        
+        logger.debug("Initializing file system observer")
         observer = Observer()
         observer.schedule(event_handler, path, recursive=True)
+        
+        logger.info("Starting file system observer")
         observer.start()
 
         logger.info(f"Started monitoring directory: {path}")
+        logger.info("Press Ctrl+C to stop")
 
         try:
             while True:
@@ -440,6 +476,7 @@ def main(path: str) -> None:
 
     except Exception as e:
         logger.error(f"Fatal error: {e}")
+        logger.exception("Full traceback:")
         sys.exit(1)
 
 if __name__ == "__main__":

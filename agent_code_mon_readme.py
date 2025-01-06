@@ -265,21 +265,41 @@ class ReadmeGenerator:
         # Get AI summary for overview
         ai_summary = self.analyzer.get_ai_summary(content, old_readme)
         
-        # Generate README sections
+        # Start with file name
         readme = f"# {os.path.basename(file_path)}\n\n"
         
-        # Overview section - focus on plain English description
+        # Overview section - preserve existing content if it exists
         readme += "## Overview\n\n"
-        if info.get('docstring'):
-            readme += f"{info['docstring'].strip()}\n\n"
-        if ai_summary:
-            # Extract just the main purpose and functionality from AI summary
-            summary_lines = ai_summary.strip().split('\n')
-            overview_lines = [line for line in summary_lines if not line.startswith(('-', '•', '*', '1.', '2.', '3.', '4.'))]
-            readme += '\n'.join(overview_lines).strip() + '\n\n'
         
-        # Add classes section (keeping as is since it's well-liked)
-        readme += self.generate_class_section(info.get('classes', []))
+        # If we have an old readme, try to preserve its overview section
+        if old_readme and "## Overview" in old_readme:
+            try:
+                overview_content = old_readme.split("## Overview")[1].split("##")[0].strip()
+                if overview_content and len(overview_content) > 50:  # Only keep if substantial
+                    readme += f"{overview_content}\n\n"
+                    logger.debug("Preserved existing overview section")
+            except Exception as e:
+                logger.warning(f"Error extracting old overview: {e}")
+        
+        # Add docstring if it exists and isn't already in the overview
+        if info.get('docstring'):
+            docstring = info['docstring'].strip()
+            readme += f"{docstring}\n\n"
+        
+        # Add AI summary, preserving its structure
+        if ai_summary:
+            # Clean up the AI summary but preserve its structure
+            summary_lines = [line.strip() for line in ai_summary.split('\n') if line.strip()]
+            # Remove any duplicate content that might already be in the docstring
+            if info.get('docstring'):
+                summary_lines = [line for line in summary_lines if line not in info['docstring']]
+            if summary_lines:
+                readme += '\n'.join(summary_lines) + '\n\n'
+        
+        # Add classes section
+        class_section = self.generate_class_section(info.get('classes', []))
+        if class_section:
+            readme += class_section
         
         return readme
 
@@ -289,6 +309,11 @@ class ReadmeGenerator:
             readme_content = self.generate_readme(file_path, content)
             readme_path = f"{file_path}_README.md"
             
+            # Verify we're not writing an empty or minimal readme
+            if len(readme_content.strip().split('\n')) <= 3:  # Just title and overview header
+                logger.warning("Generated README seems too minimal, skipping update")
+                return
+                
             with open(readme_path, 'w') as f:
                 f.write(readme_content)
                 
@@ -296,6 +321,7 @@ class ReadmeGenerator:
             
         except Exception as e:
             logger.error(f"Error updating README: {e}")
+            logger.exception("Full traceback:")
 
 class PyFileHandler(FileSystemEventHandler):
     """Handles Python file modification events."""
