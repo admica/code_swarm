@@ -225,3 +225,7 @@ Each error is:
 - Logged appropriately
 - Broadcasted to connected clients
 - Handled with automatic recovery when possible 
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 (GPLv3).

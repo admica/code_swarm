@@ -136,14 +136,6 @@ See individual README files in:
    - Verify directory permissions
    - Check agent logs
 
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
-
 ## License
 
-[Add your license here]
+This project is licensed under the GNU General Public License v3.0 (GPLv3)
