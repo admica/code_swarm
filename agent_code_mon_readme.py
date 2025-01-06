@@ -140,19 +140,28 @@ class PythonCodeAnalyzer:
     def get_ai_summary(self, content: str, old_readme: Optional[str] = None) -> Optional[str]:
         """Get AI-generated summary of the code changes using the controller's LLM service."""
         try:
+            # First analyze the code to extract essential information
+            info = self.analyze_code(content)
+            
+            # Build a concise representation
+            code_summary = f"""Module: {info.get('docstring', 'No module docstring')}
+
+Classes:
+{self._format_classes_for_summary(info.get('classes', []))}
+
+Functions:
+{self._format_functions_for_summary(info.get('functions', []))}"""
+
             context = f"Previous README:\n{old_readme}\n\n" if old_readme else ""
-            prompt = f"""{context}Analyze this Python code and provide a clear, comprehensive overview:
+            prompt = f"""{context}You are writing the overview section of a README.md file. Based on this Python code structure, write 2-3 clear sentences that explain:
+1. What this module does (its main purpose)
+2. How someone would use it
 
-{content}
+{code_summary}
 
-Focus on:
-1. The main purpose and functionality
-2. Key components and their interactions
-3. Any notable patterns or design choices
-4. Important usage considerations
+Keep it simple and direct. Focus only on the practical purpose and usage. Avoid technical details unless essential."""
 
-Keep the response under 200 words and maintain consistency with any existing documentation."""
-
+            logger.info("Sending request to controller's LLM service")
             response = requests.post(
                 f"{self.controller_url}/llm/readme/generate",
                 json={
@@ -182,6 +191,35 @@ Keep the response under 200 words and maintain consistency with any existing doc
         except Exception as e:
             logger.error(f"Error getting AI summary: {e}")
             return None
+
+    def _format_classes_for_summary(self, classes: List[Dict]) -> str:
+        """Format classes information for the LLM prompt."""
+        if not classes:
+            return "No classes defined"
+            
+        summary = []
+        for cls in classes:
+            class_info = [f"- {cls['name']}:"]
+            if cls['docstring']:
+                class_info.append(f"  {cls['docstring'].strip()}")
+            if cls['methods']:
+                methods = [f"  - {m['name']}({', '.join(m['args'])})" for m in cls['methods']]
+                class_info.extend(methods)
+            summary.extend(class_info)
+        return "\n".join(summary)
+
+    def _format_functions_for_summary(self, functions: List[Dict]) -> str:
+        """Format functions information for the LLM prompt."""
+        if not functions:
+            return "No functions defined"
+            
+        summary = []
+        for func in functions:
+            func_info = [f"- {func['name']}({', '.join(func['args'])})"]
+            if func['docstring']:
+                func_info.append(f"  {func['docstring'].strip()}")
+            summary.extend(func_info)
+        return "\n".join(summary)
 
 class ReadmeGenerator:
     """Generates README.md files for Python modules."""

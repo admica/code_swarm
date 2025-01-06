@@ -16,9 +16,11 @@ import uvicorn
 from pathlib import Path
 import asyncio
 import time
-import requests
+import aiohttp
+import requests  # Keep for sync health checks
 from datetime import datetime
 import configparser
+from contextlib import asynccontextmanager
 
 # Set up logging
 logging.basicConfig(
@@ -116,16 +118,18 @@ class LLMService:
         self.metrics = LLMMetrics()
         self.processing_task: Optional[asyncio.Task] = None
         self.ollama_url = "http://localhost:11434"
-        self.timeout = 120  # Increased timeout to 120 seconds
+        self.timeout = 120
+        self.session: Optional[aiohttp.ClientSession] = None
         
     async def start(self):
-        """Start the queue processing task."""
+        """Start the queue processing task and create HTTP session."""
         if not self.processing_task:
+            self.session = aiohttp.ClientSession()
             self.processing_task = asyncio.create_task(self._process_queue())
             logger.info("LLM queue processor started")
 
     async def stop(self):
-        """Stop the queue processing task."""
+        """Stop the queue processing task and close HTTP session."""
         if self.processing_task:
             self.processing_task.cancel()
             try:
@@ -133,19 +137,26 @@ class LLMService:
             except asyncio.CancelledError:
                 pass
             self.processing_task = None
+            if self.session:
+                await self.session.close()
+                self.session = None
             logger.info("LLM queue processor stopped")
 
     async def _process_queue(self):
         """Process requests from the queue."""
         while True:
             try:
+                logger.info("Waiting for requests in queue...")
                 request, future, enqueue_time = await self.queue.get()
                 queue_time = time.time() - enqueue_time
+                logger.info(f"Processing request from agent '{request.agent}' (queued for {queue_time:.2f}s)")
                 
                 try:
                     start_time = time.time()
+                    logger.info(f"Making LLM request to Ollama: model={request.model}, prompt_length={len(request.prompt)}")
                     response = await self._make_llm_request(request)
                     processing_time = time.time() - start_time
+                    logger.info(f"LLM request completed in {processing_time:.2f}s")
                     
                     # Record metrics
                     self.metrics.record_request(
@@ -165,10 +176,12 @@ class LLMService:
                     )
                     
                     future.set_result(llm_response)
+                    logger.info("Response sent back to agent")
                     
                 except Exception as e:
                     error_msg = str(e)
                     logger.error(f"Error processing LLM request: {error_msg}")
+                    logger.error(f"Request details: agent={request.agent}, model={request.model}")
                     
                     # Record failed request
                     self.metrics.record_request(
@@ -188,6 +201,7 @@ class LLMService:
                     )
                     
                     future.set_result(llm_response)
+                    logger.info("Error response sent back to agent")
                     
                 finally:
                     self.queue.task_done()
@@ -200,20 +214,34 @@ class LLMService:
 
     async def _make_llm_request(self, request: LLMRequest) -> str:
         """Make actual request to Ollama."""
+        if not self.session:
+            logger.error("No HTTP session available")
+            raise Exception("LLM service not properly initialized")
+            
         try:
-            response = requests.post(
+            logger.debug(f"Sending request to Ollama: {self.ollama_url}/api/generate")
+            async with self.session.post(
                 f"{self.ollama_url}/api/generate",
                 json={
                     "model": request.model,
                     "prompt": request.prompt,
                     "stream": False
                 },
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            return response.json().get('response', '')
+                timeout=aiohttp.ClientTimeout(total=self.timeout)
+            ) as response:
+                logger.debug(f"Ollama response status: {response.status}")
+                response.raise_for_status()
+                result = await response.json()
+                logger.debug("Successfully parsed Ollama response")
+                logger.debug("Ollama response content:")
+                if result.get('response'):
+                    for line in result['response'].split('\n'):
+                        if line.strip():
+                            logger.debug(f"  {line}")
+                return result.get('response', '')
             
-        except requests.exceptions.RequestException as e:
+        except aiohttp.ClientError as e:
+            logger.error(f"Ollama request failed: {str(e)}")
             raise Exception(f"Ollama service error: {str(e)}")
 
     async def submit_request(self, request: LLMRequest) -> LLMResponse:
@@ -228,31 +256,37 @@ class LLMService:
 
     async def get_status(self) -> LLMStatus:
         """Get current LLM status including available models."""
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+            
         try:
             start_time = time.time()
-            response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
-            response_time = time.time() - start_time
-            
-            if response.status_code == 200:
-                data = response.json()
-                models = [model["name"] for model in data.get("models", [])]
-                return LLMStatus(
-                    available=True,
-                    model="llama3.2",
-                    models=models,
-                    response_time=response_time,
-                    error=None
-                )
-            else:
-                return LLMStatus(
-                    available=False,
-                    error=f"Ollama returned status code: {response.status_code}",
-                    response_time=response_time,
-                    model=None,
-                    models=None
-                )
+            async with self.session.get(
+                f"{self.ollama_url}/api/tags",
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                response_time = time.time() - start_time
                 
-        except requests.exceptions.RequestException as e:
+                if response.status == 200:
+                    data = await response.json()
+                    models = [model["name"] for model in data.get("models", [])]
+                    return LLMStatus(
+                        available=True,
+                        model="llama3.2",
+                        models=models,
+                        response_time=response_time,
+                        error=None
+                    )
+                else:
+                    return LLMStatus(
+                        available=False,
+                        error=f"Ollama returned status code: {response.status}",
+                        response_time=response_time,
+                        model=None,
+                        models=None
+                    )
+                    
+        except aiohttp.ClientError as e:
             return LLMStatus(
                 available=False,
                 error=f"Failed to connect to Ollama: {str(e)}",
@@ -515,19 +549,22 @@ class SwarmController:
             return []
 
 # Initialize FastAPI app and services
-app = FastAPI(title="Code Swarm Controller", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup
+    await llm_service.start()
+    yield
+    # Shutdown
+    await llm_service.stop()
+
+app = FastAPI(
+    title="Code Swarm Controller", 
+    version="1.0.0",
+    lifespan=lifespan
+)
 controller = SwarmController()
 llm_service = LLMService()
-
-@app.on_event("startup")
-async def startup_event():
-    """Start services on application startup."""
-    await llm_service.start()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Stop services on application shutdown."""
-    await llm_service.stop()
 
 # Configuration endpoints
 @app.post("/config/monitor-path")
@@ -544,9 +581,29 @@ async def get_controller_info():
 @app.post("/llm/readme/generate")
 async def generate_readme_content(request: LLMRequest) -> LLMResponse:
     """Generate content for README files."""
+    logger.info(f"Received README generation request from agent: {request.agent}")
+    logger.info(f"Request details: model={request.model}, max_tokens={request.max_tokens}, temperature={request.temperature}")
+    logger.info("Prompt content:")
+    for line in request.prompt.split('\n'):
+        if line.strip():  # Only log non-empty lines
+            logger.info(f"  {line[:100]}..." if len(line) > 100 else f"  {line}")
+            
     if request.agent != "readme":
+        logger.error(f"Invalid agent tried to use readme endpoint: {request.agent}")
         raise HTTPException(status_code=400, detail="Invalid agent for this endpoint")
-    return await llm_service.submit_request(request)
+        
+    logger.info("Submitting request to LLM service")
+    response = await llm_service.submit_request(request)
+    
+    if response.error:
+        logger.error(f"LLM error response: {response.error}")
+    else:
+        logger.info("LLM response content:")
+        for line in response.response.split('\n'):
+            if line.strip():
+                logger.info(f"  {line}")
+    
+    return response
 
 @app.get("/llm/metrics")
 async def get_llm_metrics():
