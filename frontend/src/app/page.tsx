@@ -1,159 +1,101 @@
 'use client';
 
-import { useState } from 'react';
-import useSWR from 'swr';
-import axios from 'axios';
-import { Button } from "@/components/ui/button";
-import AgentCard from '@/components/AgentCard';
-import type { AgentStatus, AgentLogs } from '@/types/api';
-import { RefreshCw, PlayCircle, StopCircle, Folder, ServerCrash } from 'lucide-react';
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { useEffect, useState } from 'react';
+import { AgentState } from '@/types/agents';
+import { agentsApi } from '@/lib/api';
+import { useWebSocket } from '@/lib/websocket';
+import { AgentCard } from '@/components/agents/AgentCard';
+import { MonitorPathSelector } from '@/components/MonitorPathSelector';
 
-const API_BASE = 'http://localhost:8000';
-const fetcher = (url: string) => axios.get(url).then(res => res.data);
+export default function Home() {
+  const [agents, setAgents] = useState<Record<string, AgentState>>({});
+  const [monitorPath, setMonitorPath] = useState<string>('');
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-export default function Dashboard() {
-  const [projectPath, setProjectPath] = useState("/your/project/path");
-  const [isLoading, setIsLoading] = useState(false);
-  
-  // Fetch agent statuses
-  const { data: statuses, error: statusError, mutate: mutateStatuses } = useSWR<
-    Record<string, AgentStatus>
-  >(`${API_BASE}/agents`, fetcher, {
-    refreshInterval: 5000
-  });
+  // Fetch initial agents data
+  useEffect(() => {
+    const fetchAgents = async () => {
+      try {
+        const data = await agentsApi.getAgents();
+        const agentsMap = Object.fromEntries(
+          Object.entries(data).map(([name, agent]) => [name, agent])
+        );
+        setAgents(agentsMap);
+        // Set initial monitor path from any running agent
+        const runningAgent = Object.values(agentsMap).find(agent => agent.monitor_path);
+        if (runningAgent?.monitor_path) {
+          setMonitorPath(runningAgent.monitor_path);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to fetch agents');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchAgents();
+  }, []);
 
-  // Fetch logs for each agent
-  const { data: logsData } = useSWR<Record<string, AgentLogs[]>>(
-    statuses ? 
-      Object.keys(statuses).map(name => `${API_BASE}/agents/${name}/logs`) : 
-      null,
-    async (urls: string[]) => {
-      const results = await Promise.all(
-        urls.map(url => fetcher(url))
-      );
-      return Object.fromEntries(
-        urls.map((url, i) => [url.split('/')[5], results[i]])
-      );
-    },
-    { refreshInterval: 5000 }
-  );
-
-  // Actions
-  const handleAction = async (action: () => Promise<void>) => {
-    setIsLoading(true);
-    try {
-      await action();
-      await mutateStatuses();
-    } catch (error) {
-      console.error('Action failed:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const getAgentControls = (name: string) => ({
-    onStart: async (path: string) => {
-      await axios.post(`${API_BASE}/agents/${name}/start?path=${encodeURIComponent(path)}`);
-      await mutateStatuses();
-    },
-    onStop: async () => {
-      await axios.post(`${API_BASE}/agents/${name}/stop`);
-      await mutateStatuses();
-    },
-    onRestart: async () => {
-      const agent = statuses?.[name];
-      if (agent?.monitor_path) {
-        await axios.post(`${API_BASE}/agents/${name}/stop`);
-        await axios.post(`${API_BASE}/agents/${name}/start?path=${encodeURIComponent(agent.monitor_path)}`);
-        await mutateStatuses();
+  // Handle WebSocket messages
+  useWebSocket({
+    onMessage: (data) => {
+      if (data.type === 'agent_update') {
+        setAgents(prev => ({
+          ...prev,
+          [data.data.name]: data.data
+        }));
       }
     }
   });
 
-  const startAll = () => handleAction(async () => {
-    await axios.post(`${API_BASE}/agents/start-all?path=${encodeURIComponent(projectPath)}`);
-  });
+  const handleAgentStatusChange = (updatedAgent: AgentState) => {
+    setAgents(prev => ({
+      ...prev,
+      [updatedAgent.name]: updatedAgent
+    }));
+  };
 
-  const stopAll = () => handleAction(async () => {
-    await axios.post(`${API_BASE}/agents/stop-all`);
-  });
+  const handlePathChange = (newPath: string) => {
+    setMonitorPath(newPath);
+  };
 
-  const isAllRunning = statuses && Object.values(statuses).every(s => s.running);
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-slate-300">Loading...</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-red-300">Error: {error}</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100">
-      <div className="container mx-auto p-6 space-y-6">
-        {/* Header */}
-        <div className="flex flex-col space-y-4 md:flex-row md:justify-between md:items-center">
-          <div>
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-              Code Swarm Dashboard
-            </h1>
-            <p className="text-gray-400 mt-1">Monitor and control your code swarm agents</p>
-          </div>
-          
-          <div className="flex flex-col space-y-2 md:flex-row md:space-y-0 md:space-x-4">
-            <div className="relative">
-              <Folder className="absolute left-3 top-2.5 h-5 w-5 text-gray-400" />
-              <input
-                type="text"
-                value={projectPath}
-                onChange={(e) => setProjectPath(e.target.value)}
-                className="pl-10 pr-3 py-2 bg-gray-800 border border-gray-700 rounded-md text-sm text-gray-200 
-                         focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent w-full md:w-80"
-                placeholder="Project path"
-              />
-            </div>
-            
-            <div className="flex space-x-2">
-              <Button
-                variant="outline"
-                onClick={() => mutateStatuses()}
-                className="bg-gray-800 border-gray-700 hover:bg-gray-700"
-              >
-                <RefreshCw className="w-4 h-4" />
-              </Button>
-              <Button
-                variant={isAllRunning ? "destructive" : "default"}
-                onClick={isAllRunning ? stopAll : startAll}
-                disabled={isLoading}
-                className="flex-1 md:flex-none"
-              >
-                {isLoading ? (
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                ) : isAllRunning ? (
-                  <><StopCircle className="w-4 h-4 mr-2" /> Stop All</>
-                ) : (
-                  <><PlayCircle className="w-4 h-4 mr-2" /> Start All</>
-                )}
-              </Button>
-            </div>
-          </div>
+    <main className="min-h-screen bg-slate-900 text-white p-8">
+      <div className="max-w-6xl mx-auto">
+        <div className="flex items-center justify-between mb-8">
+          <h1 className="text-3xl font-bold">Code Swarm</h1>
+          <MonitorPathSelector
+            currentPath={monitorPath}
+            onPathChange={handlePathChange}
+          />
         </div>
 
-        {/* Error State */}
-        {statusError && (
-          <Alert variant="destructive" className="bg-red-900/20 border-red-800">
-            <ServerCrash className="h-4 w-4" />
-            <AlertDescription className="text-red-400">
-              Error connecting to swarm controller
-            </AlertDescription>
-          </Alert>
-        )}
-
-        {/* Agent Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {statuses && Object.entries(statuses).map(([name, status]) => (
+          {Object.entries(agents).map(([name, agent]) => (
             <AgentCard
               key={name}
-              status={status}
-              logs={logsData?.[name] || []}
-              controls={getAgentControls(name)}
+              agent={agent}
+              onStatusChange={handleAgentStatusChange}
             />
           ))}
         </div>
       </div>
-    </div>
+    </main>
   );
 }
