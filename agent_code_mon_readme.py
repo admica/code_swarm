@@ -54,6 +54,8 @@ class ConfigManager:
             'watch_patterns': '*.py',
             'ignore_patterns': '__pycache__/*,.*,test_*',
             'readme_sections': 'overview,functions,classes,dependencies,usage',
+            'ai_marker_begin': '(BEGIN AI Generated)',
+            'ai_marker_end': '(END AI Generated)',
         }
         
         with open(self.config_path, 'w') as f:
@@ -137,89 +139,87 @@ class PythonCodeAnalyzer:
             logger.error(f"Error analyzing Python code: {e}")
             return {}
 
-    def get_ai_summary(self, content: str, old_readme: Optional[str] = None) -> Optional[str]:
-        """Get AI-generated summary of the code changes using the controller's LLM service."""
+    def get_ai_analysis(self, code_info: Dict[str, any], old_content: Optional[str] = None) -> Optional[str]:
+        """Get AI analysis of the code using LLM.
+        
+        Args:
+            code_info: Analyzed code information (from analyze_code)
+            old_content: Previous content of the README, if any
+        """
         try:
-            # First analyze the code to extract essential information
-            info = self.analyze_code(content)
+            # Extract just the essential information for the overview
+            overview = {
+                'docstring': code_info.get('docstring', '').strip(),
+                'classes': [{'name': c['name'], 
+                           'docstring': c['docstring'].split('.')[0] if c['docstring'] else '',  # Just first sentence
+                           'methods': [m['name'] for m in c.get('methods', [])]} 
+                          for c in code_info.get('classes', [])],
+                'functions': [{'name': f['name'],
+                             'docstring': f['docstring'].split('.')[0] if f['docstring'] else ''}
+                            for f in code_info.get('functions', [])]
+            }
             
-            # Build a concise representation
-            code_summary = f"""Module: {info.get('docstring', 'No module docstring')}
+            # Build a concise prompt
+            prompt = f"""Analyze this Python module and generate a README overview:
+
+Module Purpose:
+{overview['docstring'] or 'No module docstring available.'}
 
 Classes:
-{self._format_classes_for_summary(info.get('classes', []))}
+{chr(10).join(f'- {c["name"]}: {c["docstring"]}' for c in overview['classes']) if overview['classes'] else 'None'}
 
 Functions:
-{self._format_functions_for_summary(info.get('functions', []))}"""
+{chr(10).join(f'- {f["name"]}: {f["docstring"]}' for f in overview['functions']) if overview['functions'] else 'None'}
 
-            context = f"Previous README:\n{old_readme}\n\n" if old_readme else ""
-            prompt = f"""{context}You are writing the overview section of a README.md file. Based on this Python code structure, write 2-3 clear sentences that explain:
-1. What this module does (its main purpose)
-2. How someone would use it
+Please provide:
+1. A clear, concise overview of the module's purpose
+2. Key features and functionality
+3. Any notable implementation details
+Keep the response focused and under 200 words.
 
-{code_summary}
-
-Keep it simple and direct. Focus only on the practical purpose and usage. Avoid technical details unless essential."""
-
-            logger.info("Sending request to controller's LLM service")
+Important: Do NOT include any AI markers in your response. The markers will be added automatically."""
+            
             response = requests.post(
-                f"{self.controller_url}/llm/readme/generate",
+                f"{self.controller_url}/api/llm/readme/generate",
                 json={
                     "prompt": prompt,
                     "model": self.ollama_model,
-                    "agent": "readme"
+                    "agent": "readme",
+                    "max_tokens": 1000,
+                    "temperature": 0.7
                 },
-                timeout=30
+                timeout=60
             )
             
-            if response.status_code == 404:
-                logger.warning("Controller LLM endpoint not found")
-                return None
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('response'):
+                    # Get the response without any markers that might have been included
+                    ai_response = result['response'].strip()
+                    ai_response = ai_response.replace('(BEGIN AI Generated)', '')
+                    ai_response = ai_response.replace('BEGIN AI Generated', '')
+                    ai_response = ai_response.replace('(END AI Generated)', '')
+                    ai_response = ai_response.replace('END AI Generated', '')
+                    ai_response = ai_response.strip()
+                    
+                    # Add the markers properly
+                    return f"(BEGIN AI Generated)\n{ai_response}\n(END AI Generated)"
+                    
+                if result.get('error'):
+                    logger.error(f"LLM error: {result['error']}")
+            else:
+                logger.error(f"LLM request failed with status {response.status_code}")
+                logger.error(f"Response content: {response.text}")
                 
-            response.raise_for_status()
-            result = response.json()
-            
-            if result.get('error'):
-                logger.warning(f"LLM error: {result['error']}")
-                return None
-                
-            return result.get('response')
-            
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Controller service error: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Error getting AI summary: {e}")
-            return None
-
-    def _format_classes_for_summary(self, classes: List[Dict]) -> str:
-        """Format classes information for the LLM prompt."""
-        if not classes:
-            return "No classes defined"
+            logger.error(f"Error getting AI analysis: {e}")
             
-        summary = []
-        for cls in classes:
-            class_info = [f"- {cls['name']}:"]
-            if cls['docstring']:
-                class_info.append(f"  {cls['docstring'].strip()}")
-            if cls['methods']:
-                methods = [f"  - {m['name']}({', '.join(m['args'])})" for m in cls['methods']]
-                class_info.extend(methods)
-            summary.extend(class_info)
-        return "\n".join(summary)
+        return None
 
-    def _format_functions_for_summary(self, functions: List[Dict]) -> str:
-        """Format functions information for the LLM prompt."""
-        if not functions:
-            return "No functions defined"
-            
-        summary = []
-        for func in functions:
-            func_info = [f"- {func['name']}({', '.join(func['args'])})"]
-            if func['docstring']:
-                func_info.append(f"  {func['docstring'].strip()}")
-            summary.extend(func_info)
-        return "\n".join(summary)
+    def _build_prompt(self, code_info: Dict[str, any]) -> str:
+        """Build a prompt for the LLM to generate a summary or analysis."""
+        # TODO: make this, use this
+        return ""
 
 class ReadmeGenerator:
     """Generates README.md files for Python modules."""
@@ -262,44 +262,60 @@ class ReadmeGenerator:
         # Analyze the code
         info = self.analyzer.analyze_code(content)
         
-        # Get AI summary for overview
-        ai_summary = self.analyzer.get_ai_summary(content, old_readme)
-        
         # Start with file name
         readme = f"# {os.path.basename(file_path)}\n\n"
         
-        # Overview section - preserve existing content if it exists
+        # Overview section
         readme += "## Overview\n\n"
         
-        # If we have an old readme, try to preserve its overview section
-        if old_readme and "## Overview" in old_readme:
-            try:
-                overview_content = old_readme.split("## Overview")[1].split("##")[0].strip()
-                if overview_content and len(overview_content) > 50:  # Only keep if substantial
-                    readme += f"{overview_content}\n\n"
-                    logger.debug("Preserved existing overview section")
-            except Exception as e:
-                logger.warning(f"Error extracting old overview: {e}")
-        
-        # Add docstring if it exists and isn't already in the overview
+        # Add docstring if available
         if info.get('docstring'):
             docstring = info['docstring'].strip()
             readme += f"{docstring}\n\n"
         
-        # Add AI summary, preserving its structure
-        if ai_summary:
-            # Clean up the AI summary but preserve its structure
-            summary_lines = [line.strip() for line in ai_summary.split('\n') if line.strip()]
-            # Remove any duplicate content that might already be in the docstring
-            if info.get('docstring'):
-                summary_lines = [line for line in summary_lines if line not in info['docstring']]
-            if summary_lines:
-                readme += '\n'.join(summary_lines) + '\n\n'
+        # Get AI summary and generated content
+        ai_summary = self.analyzer.get_ai_analysis(info, old_readme)
         
-        # Add classes section
-        class_section = self.generate_class_section(info.get('classes', []))
-        if class_section:
-            readme += class_section
+        # If we have an old readme, preserve non-AI content
+        if old_readme and "## Overview" in old_readme:
+            try:
+                overview_content = old_readme.split("## Overview")[1].split("##")[0].strip()
+                if overview_content:
+                    # Keep any content outside AI markers
+                    parts = overview_content.split("(BEGIN AI Generated)")
+                    if len(parts) > 1:
+                        # Add any content before AI section
+                        if parts[0].strip():
+                            readme += f"{parts[0].strip()}\n\n"
+                    else:
+                        # No AI markers found, treat as manual content
+                        readme += f"{overview_content}\n\n"
+            except Exception as e:
+                logger.warning(f"Error extracting old overview: {e}")
+        
+        # Add AI-generated content
+        if ai_summary:
+            # Extract the content between markers
+            ai_content = ai_summary.split("(BEGIN AI Generated)")[1].split("(END AI Generated)")[0].strip()
+            
+            # Start AI section
+            readme += "(BEGIN AI Generated)\n"
+            
+            # Add AI summary
+            readme += ai_content + "\n\n"
+            
+            # Add classes section within AI markers
+            class_section = self.generate_class_section(info.get('classes', []))
+            if class_section:
+                readme += class_section
+            
+            # End AI section
+            readme += "(END AI Generated)\n"
+        else:
+            # If no AI content, add classes section without markers
+            class_section = self.generate_class_section(info.get('classes', []))
+            if class_section:
+                readme += class_section
         
         return readme
 

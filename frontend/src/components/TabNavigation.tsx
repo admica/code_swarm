@@ -6,21 +6,24 @@ interface TabNavigationProps {
 export function TabNavigation({ activeTab, onTabChange }: TabNavigationProps) {
   const tabs = [
     { id: 'dashboard', label: 'Dashboard' },
+    { id: 'llm', label: 'LLM Monitoring' },
     { id: 'settings', label: 'Settings' }
   ];
 
   return (
     <div className="border-b border-slate-800">
-      <nav className="flex space-x-4" aria-label="Tabs">
-        {tabs.map((tab) => (
+      <nav className="-mb-px flex space-x-8">
+        {tabs.map(tab => (
           <button
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
-            className={`px-3 py-2 text-sm font-medium border-b-2 ${
-              activeTab === tab.id
-                ? 'text-blue-300 border-blue-300'
-                : 'text-slate-400 border-transparent hover:text-slate-300 hover:border-slate-700'
-            }`}
+            className={`
+              py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap
+              ${activeTab === tab.id
+                ? 'border-indigo-500 text-indigo-300'
+                : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-700'
+              }
+            `}
           >
             {tab.label}
           </button>

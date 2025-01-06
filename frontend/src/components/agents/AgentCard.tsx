@@ -1,107 +1,69 @@
-import { AgentState, AgentType } from '@/types/agents';
-import { agentsApi } from '@/lib/api';
-import { useState, useEffect } from 'react';
-
-const agentInfo: Record<string, { title: string; description: string }> = {
-  changelog: {
-    title: 'Changelog Agent',
-    description: 'Monitors file changes and generates detailed changelogs with AI analysis'
-  },
-  readme: {
-    title: 'README Agent',
-    description: 'Automatically generates and maintains README files for Python modules'
-  },
-  deps: {
-    title: 'Dependency Agent',
-    description: 'Creates visual dependency graphs of your Python project structure'
-  }
-};
+import { AgentState } from '../../types/agents';
 
 interface AgentCardProps {
+  name: string;
   agent: AgentState;
-  onStatusChange?: (agent: AgentState) => void;
+  onControl: (action: 'start' | 'stop') => void;
 }
 
-export function AgentCard({ agent, onStatusChange }: AgentCardProps) {
-  const [isLoading, setIsLoading] = useState(false);
-  const info = agentInfo[agent.name];
-
-  const handleControl = async (action: 'start' | 'stop') => {
-    try {
-      setIsLoading(true);
-      console.log(`${action}ing agent ${agent.name}...`);
-      const response = await agentsApi.controlAgent(agent.name, action);
-      console.log('Agent control response:', response);
-      
-      // Update local state with the response
-      if (response) {
-        onStatusChange?.(response);
-      }
-    } catch (error) {
-      console.error('Error controlling agent:', error);
-    } finally {
-      setIsLoading(false);
+export function AgentCard({ name, agent, onControl }: AgentCardProps) {
+  const getTitle = () => {
+    switch (name) {
+      case 'changelog':
+        return 'Changelog Agent';
+      case 'readme':
+        return 'README Agent';
+      case 'deps':
+        return 'Dependency Agent';
+      default:
+        return `${name} Agent`;
     }
   };
 
-  // Debug log when agent status changes
-  useEffect(() => {
-    console.log(`Agent ${agent.name} status:`, {
-      running: agent.running,
-      pid: agent.pid,
-      error: agent.last_error
-    });
-  }, [agent]);
+  const getDescription = () => {
+    switch (name) {
+      case 'changelog':
+        return 'Monitors code changes and generates changelogs';
+      case 'readme':
+        return 'Keeps README files up to date';
+      case 'deps':
+        return 'Analyzes project dependencies';
+      default:
+        return 'Monitors and analyzes code';
+    }
+  };
+
+  const getStatusColor = () => {
+    if (agent.last_error) return 'bg-red-500';
+    return agent.running ? 'bg-green-500' : 'bg-gray-500';
+  };
+
+  const handleControl = () => {
+    onControl(agent.running ? 'stop' : 'start');
+  };
 
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-800/50 shadow-lg">
       <div className="p-6">
-        <div className="flex items-center justify-between">
-          <h3 className="text-2xl font-semibold leading-none tracking-tight text-white">
-            {info.title}
-          </h3>
-          <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium
-            ${agent.running ? 'bg-green-900/50 text-green-300' :
-              agent.last_error ? 'bg-red-900/50 text-red-300' :
-                'bg-slate-700 text-slate-300'}`}>
-            {agent.running ? 'running' : agent.last_error ? 'error' : 'idle'}
-          </span>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-white">{getTitle()}</h3>
+          <div className={`w-3 h-3 rounded-full ${getStatusColor()}`} />
         </div>
-        
-        <p className="text-sm text-slate-300 mt-2">
-          {info.description}
-        </p>
-
-        {agent.monitor_path && (
-          <div className="mt-4 text-sm text-slate-400">
-            <span className="font-medium text-slate-300">Monitoring:</span> {agent.monitor_path}
-          </div>
-        )}
-
-        {agent.last_error && (
-          <div className="mt-4 text-sm text-red-300">
-            <span className="font-medium">Error:</span> {agent.last_error}
-          </div>
-        )}
-
-        {agent.pid && (
-          <div className="mt-4 text-sm text-slate-400">
-            <span className="font-medium text-slate-300">PID:</span> {agent.pid}
-          </div>
-        )}
-
-        <div className="mt-6 flex justify-end gap-2">
+        <p className="text-slate-300 mb-4">{getDescription()}</p>
+        <div className="flex items-center justify-between">
           <button
-            onClick={() => handleControl(agent.running ? 'stop' : 'start')}
-            disabled={isLoading}
-            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors
-              ${agent.running
+            onClick={handleControl}
+            className={`px-4 py-2 rounded ${
+              agent.running
                 ? 'bg-red-900/50 text-red-300 hover:bg-red-900'
                 : 'bg-green-900/50 text-green-300 hover:bg-green-900'
-              } disabled:opacity-50`}
+            }`}
           >
-            {isLoading ? 'Loading...' : agent.running ? 'Stop' : 'Start'}
+            {agent.running ? 'Stop' : 'Start'}
           </button>
+          {agent.last_error && (
+            <span className="text-red-300 text-sm">{agent.last_error}</span>
+          )}
         </div>
       </div>
     </div>

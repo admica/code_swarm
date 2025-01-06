@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { agentsApi } from '@/lib/api';
+import { agentsApi } from '../lib/api';
 
 interface MonitorPathSelectorProps {
   currentPath?: string;

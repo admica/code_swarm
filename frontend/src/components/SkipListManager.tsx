@@ -1,5 +1,11 @@
-import { useState, useEffect } from 'react';
-import { agentsApi } from '@/lib/api';
+import { useState, useEffect, useCallback } from 'react';
+import { agentsApi } from '../lib/api';
+import { useWebSocket } from '@/lib/websocket';
+
+interface WebSocketMessage {
+  type: string;
+  data: any;
+}
 
 interface SkipListManagerProps {
   className?: string;
@@ -10,6 +16,14 @@ export function SkipListManager({ className = '' }: SkipListManagerProps) {
   const [newEntry, setNewEntry] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const handleMessage = useCallback((message: WebSocketMessage) => {
+    if (message.type === 'skip_list_update') {
+      setSkipList(message.data);
+    }
+  }, []);
+
+  useWebSocket({ onMessage: handleMessage });
 
   // Load initial skip list
   useEffect(() => {
@@ -37,7 +51,6 @@ export function SkipListManager({ className = '' }: SkipListManagerProps) {
       setIsLoading(true);
       const updatedList = [...skipList, newEntry.trim()];
       await agentsApi.updateSkipList(updatedList);
-      setSkipList(updatedList);
       setNewEntry('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update skip list');
@@ -51,7 +64,6 @@ export function SkipListManager({ className = '' }: SkipListManagerProps) {
       setIsLoading(true);
       const updatedList = skipList.filter(item => item !== entry);
       await agentsApi.updateSkipList(updatedList);
-      setSkipList(updatedList);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update skip list');
     } finally {

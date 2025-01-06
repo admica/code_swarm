@@ -10,6 +10,13 @@ export interface AgentState {
   last_error: string | null;
 }
 
+export interface ControllerInfo {
+  monitor_path: string | null;
+  skip_list: string[];
+  ollama_available: boolean;
+  ollama_model: string | null;
+}
+
 export interface ChangelogEntry {
   timestamp: string;
   file: string;

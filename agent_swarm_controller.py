@@ -361,6 +361,21 @@ class SwarmController:
         }
         self.monitor_task = None
 
+    def _save_config(self) -> None:
+        """Save current configuration to config.ini file."""
+        try:
+            if not self.config.has_section('swarm_controller'):
+                self.config.add_section('swarm_controller')
+            
+            with open('config.ini', 'w') as configfile:
+                self.config.write(configfile)
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save configuration: {str(e)}"
+            )
+
     async def get_info(self) -> ControllerInfo:
         """Get controller information."""
         ollama_status = await llm_service.get_status()
@@ -384,6 +399,12 @@ class SwarmController:
             
             with open('config.ini', 'w') as configfile:
                 self.config.write(configfile)
+            
+            # Broadcast the update
+            asyncio.create_task(manager.broadcast({
+                "type": "skip_list_update",
+                "data": skip_list
+            }))
             
             return {"success": True, "skip_list": skip_list}
         except Exception as e:
@@ -734,12 +755,19 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             # Wait for messages but primarily use this for sending updates
             data = await websocket.receive_text()
-            # You can handle incoming messages here if needed
+            try:
+                message = json.loads(data)
+                if message.get('type') == 'ping':
+                    await websocket.send_json({'type': 'pong'})
+            except json.JSONDecodeError:
+                logger.error(f"Invalid WebSocket message format: {data}")
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        logger.info("WebSocket client disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
+        logger.info("WebSocket client disconnected due to error")
 
 # Move all endpoints to API router
 @api_router.post("/config/monitor-path")
@@ -856,7 +884,6 @@ async def check_llm_health():
         raise HTTPException(status_code=503, detail=status.error or "LLM service unavailable")
     return {"status": "healthy", "response_time": status.response_time}
 
-# Add LLM endpoints
 @api_router.post("/llm/readme/generate")
 async def generate_readme_content(request: LLMRequest) -> LLMResponse:
     """Generate content for README files."""
@@ -942,6 +969,38 @@ async def analyze_dependencies(request: LLMRequest) -> LLMResponse:
 async def update_skip_list(skip_list: List[str]):
     """Update the skip list configuration."""
     return controller.update_skip_list(skip_list)
+
+@api_router.get("/config/ai-markers")
+async def get_ai_markers():
+    """Get the AI content markers configuration."""
+    try:
+        if not controller.config.has_section('agent_code_mon_readme'):
+            return {
+                "begin": "(BEGIN AI Generated)",
+                "end": "(END AI Generated)"
+            }
+        return {
+            "begin": controller.config.get('agent_code_mon_readme', 'ai_marker_begin', fallback='(BEGIN AI Generated)'),
+            "end": controller.config.get('agent_code_mon_readme', 'ai_marker_end', fallback='(END AI Generated)')
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/config/ai-markers")
+async def set_ai_markers(begin: str, end: str):
+    """Set the AI content markers configuration."""
+    try:
+        if not controller.config.has_section('agent_code_mon_readme'):
+            controller.config.add_section('agent_code_mon_readme')
+        
+        controller.config['agent_code_mon_readme']['ai_marker_begin'] = begin
+        controller.config['agent_code_mon_readme']['ai_marker_end'] = end
+        
+        controller._save_config()
+        
+        return {"success": True, "begin": begin, "end": end}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Include the API router
 app.include_router(api_router)

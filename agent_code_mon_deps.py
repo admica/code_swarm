@@ -413,7 +413,7 @@ class DependencyAnalyzer:
             analysis = {
                 "total_files": len(dependencies),
                 "files_with_deps": len([f for f in dependencies.values() if f]),
-                "max_deps": max(len(deps) for deps in dependencies.values()),
+                "max_deps": max((len(deps) for deps in dependencies.values()), default=0),
                 "circular_deps": [],
                 "highly_coupled": []
             }

@@ -19,8 +19,10 @@ class WebSocketClient {
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private url = 'ws://localhost:8000/ws';
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  private maxReconnectAttempts = 10;
   private backendAvailable = true;
+  private pingInterval: NodeJS.Timeout | null = null;
+  private pongTimeout: NodeJS.Timeout | null = null;
 
   connect() {
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -44,12 +46,20 @@ class WebSocketClient {
         this.reconnectAttempts = 0;
         this.backendAvailable = true;
         this.updateStatus('connected');
+        this.startPingPong();
       };
 
       this.ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
           console.debug('WebSocket message received:', message);
+          
+          // Handle ping/pong messages
+          if (message.type === 'pong') {
+            this.handlePong();
+            return;
+          }
+          
           this.messageHandlers.forEach(handler => handler(message));
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
@@ -111,6 +121,14 @@ class WebSocketClient {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
     }
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    if (this.pongTimeout) {
+      clearTimeout(this.pongTimeout);
+      this.pongTimeout = null;
+    }
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -149,6 +167,36 @@ class WebSocketClient {
   subscribeToStatus(handler: (status: ConnectionStatus) => void) {
     this.statusHandlers.add(handler);
     return () => this.statusHandlers.delete(handler);
+  }
+
+  private startPingPong() {
+    // Clear any existing intervals
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+    }
+    if (this.pongTimeout) {
+      clearTimeout(this.pongTimeout);
+    }
+
+    // Send a ping every 30 seconds
+    this.pingInterval = setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'ping' }));
+        
+        // Set a timeout to close the connection if no pong is received
+        this.pongTimeout = setTimeout(() => {
+          console.log('No pong received, closing connection');
+          this.ws?.close();
+        }, 5000); // Wait 5 seconds for pong
+      }
+    }, 30000);
+  }
+
+  private handlePong() {
+    if (this.pongTimeout) {
+      clearTimeout(this.pongTimeout);
+      this.pongTimeout = null;
+    }
   }
 }
 

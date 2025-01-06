@@ -1,4 +1,5 @@
 import { SkipListManager } from '@/components/SkipListManager';
+import { AIMarkerConfig } from '@/components/AIMarkerConfig';
 
 export function Settings() {
   return (
@@ -20,6 +21,10 @@ export function Settings() {
             <code className="ml-2 text-slate-300">.git/</code>
           </p>
           <SkipListManager />
+        </section>
+
+        <section>
+          <AIMarkerConfig />
         </section>
       </div>
     </div>

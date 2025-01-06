@@ -1,25 +1,28 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { AgentState } from '@/types/agents';
-import { agentsApi } from '@/lib/api';
-import { useWebSocket, ConnectionStatus } from '@/lib/websocket';
-import { TabNavigation } from '@/components/TabNavigation';
-import { Dashboard } from '@/components/Dashboard';
-import { Settings } from '@/components/Settings';
+import { AgentState } from '../types/agents';
+import { AgentCard } from '../components/agents/AgentCard';
+import { MonitorPathSelector } from '../components/MonitorPathSelector';
+import { LogWindow } from '../components/LogWindow';
+import { agentsApi } from '../lib/api';
+import { TabNavigation } from '../components/TabNavigation';
+import { SkipListManager } from '../components/SkipListManager';
+import { LLMMonitoring } from '../components/LLMMonitoring';
 
 export default function Home() {
   const [agents, setAgents] = useState<Record<string, AgentState>>({});
   const [monitorPath, setMonitorPath] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [wsStatus, setWsStatus] = useState<ConnectionStatus>('disconnected');
   const [activeTab, setActiveTab] = useState('dashboard');
 
   // Load initial configuration and agents
   useEffect(() => {
     const initialize = async () => {
       try {
+        setIsLoading(true);
+        
         // Get initial configuration
         const config = await agentsApi.getConfig();
         if (config.monitor_path) {
@@ -42,106 +45,93 @@ export default function Home() {
     initialize();
   }, []);
 
-  // Handle WebSocket messages
-  useWebSocket({
-    onMessage: (data) => {
-      console.log('WebSocket message received:', data);
-      if (data.type === 'agent_update') {
-        console.log('Updating agent status:', data.data);
-        setAgents(prev => {
-          const newAgents = {
-            ...prev,
-            [data.data.name]: {
-              ...prev[data.data.name],
-              ...data.data
-            }
-          };
-          console.log('New agents state:', newAgents);
-          return newAgents;
-        });
-      }
-    },
-    onStatusChange: (status) => {
-      console.log('WebSocket status changed:', status);
-      setWsStatus(status);
+  // Handle monitor path changes
+  const handleMonitorPathChange = async (path: string) => {
+    try {
+      await agentsApi.setMonitorPath(path);
+      setMonitorPath(path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to set monitor path');
     }
-  });
-
-  const handleAgentStatusChange = (updatedAgent: AgentState) => {
-    console.log('Agent status change handler called:', updatedAgent);
-    setAgents(prev => {
-      const newAgents = {
-        ...prev,
-        [updatedAgent.name]: {
-          ...prev[updatedAgent.name],
-          ...updatedAgent
-        }
-      };
-      console.log('New agents state after manual update:', newAgents);
-      return newAgents;
-    });
   };
 
-  const handlePathChange = (newPath: string) => {
-    setMonitorPath(newPath);
+  // Handle agent control
+  const handleAgentControl = async (agentName: string, action: 'start' | 'stop') => {
+    try {
+      const updatedAgent = await agentsApi.controlAgent(agentName, action);
+      setAgents(prev => ({
+        ...prev,
+        [agentName]: updatedAgent
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${action} agent`);
+    }
   };
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-slate-300">Loading...</div>
+      <div className="flex items-center justify-center min-h-screen bg-slate-900 text-slate-300">
+        Loading...
       </div>
     );
   }
 
-  if (error || wsStatus === 'error') {
+  if (error) {
     return (
-      <div className="min-h-screen bg-slate-900 text-white p-8">
-        <div className="max-w-6xl mx-auto">
-          <div className="rounded-lg border border-red-900/50 bg-red-900/10 p-8 text-center">
-            <h2 className="text-2xl font-bold text-red-300 mb-4">
-              Connection Error
-            </h2>
-            <p className="text-red-200 mb-6">
-              {error || "Unable to connect to the backend server. Please ensure:"}
-            </p>
-            <ul className="text-red-200 text-left max-w-md mx-auto space-y-2 mb-8">
-              <li>1. The backend server is running (<code className="bg-red-900/50 px-2 py-0.5 rounded">python agent_swarm_controller.py</code>)</li>
-              <li>2. The server is accessible at <code className="bg-red-900/50 px-2 py-0.5 rounded">http://localhost:8000</code></li>
-              <li>3. There are no firewall restrictions blocking the connection</li>
-            </ul>
-            <button
-              onClick={() => window.location.reload()}
-              className="px-4 py-2 rounded bg-red-900/50 text-red-200 hover:bg-red-900 transition-colors"
-            >
-              Retry Connection
-            </button>
-          </div>
-        </div>
+      <div className="flex items-center justify-center min-h-screen bg-slate-900 text-red-300">
+        Error: {error}
       </div>
     );
   }
+
+  const renderContent = () => {
+    switch (activeTab) {
+      case 'dashboard':
+        return (
+          <>
+            <div className="mb-8">
+              <MonitorPathSelector
+                currentPath={monitorPath}
+                onPathChange={handleMonitorPathChange}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+              {Object.entries(agents).map(([name, agent]) => (
+                <AgentCard
+                  key={name}
+                  name={name}
+                  agent={agent}
+                  onControl={(action) => handleAgentControl(name, action)}
+                />
+              ))}
+            </div>
+
+            <div className="mt-8">
+              <LogWindow agents={Object.keys(agents)} />
+            </div>
+          </>
+        );
+      case 'llm':
+        return <LLMMonitoring />;
+      case 'settings':
+        return <SkipListManager />;
+      default:
+        return null;
+    }
+  };
 
   return (
-    <main className="min-h-screen bg-slate-900 text-white p-8">
-      <div className="max-w-6xl mx-auto space-y-6">
+    <div className="min-h-screen bg-slate-900 text-slate-300 p-8">
+      <div className="max-w-7xl mx-auto space-y-8">
         <TabNavigation
           activeTab={activeTab}
           onTabChange={setActiveTab}
         />
-
-        {activeTab === 'dashboard' ? (
-          <Dashboard
-            agents={agents}
-            monitorPath={monitorPath}
-            wsStatus={wsStatus}
-            onAgentStatusChange={handleAgentStatusChange}
-            onPathChange={handlePathChange}
-          />
-        ) : (
-          <Settings />
-        )}
+        <div className="mt-8">
+          {renderContent()}
+        </div>
       </div>
-    </main>
+    </div>
   );
 }
