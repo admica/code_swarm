@@ -178,43 +178,73 @@ Please provide:
 Keep the response focused and under 200 words.
 
 Important: Do NOT include any AI markers in your response. The markers will be added automatically."""
-            
-            response = requests.post(
-                f"{self.controller_url}/api/llm/readme/generate",
-                json={
-                    "prompt": prompt,
-                    "model": self.ollama_model,
-                    "agent": "readme",
-                    "max_tokens": 1000,
-                    "temperature": 0.7
-                },
-                timeout=60
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('response'):
-                    # Get the response without any markers that might have been included
-                    ai_response = result['response'].strip()
-                    ai_response = ai_response.replace('(BEGIN AI Generated)', '')
-                    ai_response = ai_response.replace('BEGIN AI Generated', '')
-                    ai_response = ai_response.replace('(END AI Generated)', '')
-                    ai_response = ai_response.replace('END AI Generated', '')
-                    ai_response = ai_response.strip()
+
+            max_retries = 3
+            retry_delay = 1.0  # seconds
+            last_error = None
+
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        logger.info(f"Retrying LLM request (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay * attempt)  # Exponential backoff
+
+                    response = requests.post(
+                        f"{self.controller_url}/api/llm/generate",
+                        json={
+                            "prompt": prompt,
+                            "model": self.ollama_model,
+                            "agent": "readme",
+                            "max_tokens": 1000,
+                            "temperature": 0.7
+                        },
+                        timeout=60
+                    )
                     
-                    # Add the markers properly
-                    return f"(BEGIN AI Generated)\n{ai_response}\n(END AI Generated)"
-                    
-                if result.get('error'):
-                    logger.error(f"LLM error: {result['error']}")
-            else:
-                logger.error(f"LLM request failed with status {response.status_code}")
-                logger.error(f"Response content: {response.text}")
-                
+                    if response.status_code == 200:
+                        result = response.json()
+                        if result.get('response'):
+                            # Get the response without any markers that might have been included
+                            ai_response = result['response'].strip()
+                            ai_response = ai_response.replace('(BEGIN AI Generated)', '')
+                            ai_response = ai_response.replace('BEGIN AI Generated', '')
+                            ai_response = ai_response.replace('(END AI Generated)', '')
+                            ai_response = ai_response.replace('END AI Generated', '')
+                            ai_response = ai_response.strip()
+                            
+                            # Add the markers properly
+                            return f"(BEGIN AI Generated)\n{ai_response}\n(END AI Generated)"
+                            
+                        if result.get('error'):
+                            last_error = f"LLM error: {result['error']}"
+                            logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
+                            if attempt == max_retries - 1:
+                                logger.error(last_error)
+                                return None
+
+                    elif response.status_code == 404:
+                        logger.error("LLM endpoint not found")
+                        return None
+                    else:
+                        last_error = f"LLM request failed with status {response.status_code}: {response.text}"
+                        logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
+                        if attempt == max_retries - 1:
+                            logger.error(last_error)
+                            return None
+
+                except requests.exceptions.RequestException as e:
+                    last_error = f"Request error: {str(e)}"
+                    logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
+                    if attempt == max_retries - 1:
+                        logger.error(last_error)
+                        return None
+
+            logger.error(f"All {max_retries} attempts failed. Last error: {last_error}")
+            return None
+
         except Exception as e:
-            logger.error(f"Error getting AI analysis: {e}")
-            
-        return None
+            logger.error(f"Unexpected error in AI analysis: {e}")
+            return None
 
     def _build_prompt(self, code_info: Dict[str, any]) -> str:
         """Build a prompt for the LLM to generate a summary or analysis."""

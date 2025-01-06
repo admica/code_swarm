@@ -390,10 +390,10 @@ class DependencyAnalyzer:
         return mermaid
 
     def get_ai_insights(self, dependencies: Dict[str, List[str]]) -> Optional[str]:
-        """Get AI insights about the project's dependency structure.
+        """Get AI insights about the dependency structure using LLM.
         
         Args:
-            dependencies: Dictionary of file dependencies
+            dependencies: Dictionary mapping files to their dependencies
             
         Returns:
             AI analysis text or None if disabled or service unavailable
@@ -402,13 +402,6 @@ class DependencyAnalyzer:
             return None
 
         try:
-            # First check if controller is available
-            try:
-                requests.get(f"{self.controller_url}/llm/health", timeout=1)
-            except requests.exceptions.RequestException:
-                logger.warning("Controller service not available, skipping AI analysis")
-                return None
-
             # Build a structural analysis of the dependency graph
             analysis = {
                 "total_files": len(dependencies),
@@ -458,32 +451,60 @@ Please provide:
 3. Specific recommendations for improvement
 Keep the response under 200 words."""
 
-            response = requests.post(
-                f"{self.controller_url}/llm/deps/analyze",
-                json={
-                    "prompt": prompt,
-                    "model": self.ollama_model,
-                    "agent": "deps"
-                },
-                timeout=30
-            )
+            max_retries = 3
+            retry_delay = 1.0  # seconds
+            last_error = None
 
-            if response.status_code == 404:
-                logger.warning("Controller LLM endpoint not found, skipping AI analysis")
-                return None
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        logger.info(f"Retrying LLM request (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay * attempt)  # Exponential backoff
 
-            response.raise_for_status()
-            result = response.json()
-            
-            if result.get('error'):
-                logger.warning(f"LLM error: {result['error']}")
-                return None
-                
-            return result.get('response')
-            
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Controller service error: {e}")
+                    response = requests.post(
+                        f"{self.controller_url}/api/llm/generate",
+                        json={
+                            "prompt": prompt,
+                            "model": self.ollama_model,
+                            "agent": "deps",
+                            "max_tokens": 1000,
+                            "temperature": 0.7
+                        },
+                        timeout=30
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        if result.get('response'):
+                            return result['response']
+                            
+                        if result.get('error'):
+                            last_error = f"LLM error: {result['error']}"
+                            logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
+                            if attempt == max_retries - 1:
+                                logger.error(last_error)
+                                return None
+
+                    elif response.status_code == 404:
+                        logger.error("LLM endpoint not found")
+                        return None
+                    else:
+                        last_error = f"LLM request failed with status {response.status_code}: {response.text}"
+                        logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
+                        if attempt == max_retries - 1:
+                            logger.error(last_error)
+                            return None
+
+                except requests.exceptions.RequestException as e:
+                    last_error = f"Request error: {str(e)}"
+                    logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
+                    if attempt == max_retries - 1:
+                        logger.error(last_error)
+                        return None
+
+            logger.error(f"All {max_retries} attempts failed. Last error: {last_error}")
             return None
+
         except Exception as e:
             logger.error(f"Unexpected error in AI analysis: {e}")
             return None

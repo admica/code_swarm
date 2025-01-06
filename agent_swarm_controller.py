@@ -130,6 +130,8 @@ class LLMService:
         self.ollama_url = "http://localhost:11434"
         self.timeout = 120
         self.session: Optional[aiohttp.ClientSession] = None
+        self.max_retries = 3
+        self.retry_delay = 1.0  # seconds
         
     async def start(self):
         """Start the queue processing task and create HTTP session."""
@@ -223,36 +225,54 @@ class LLMService:
                 await asyncio.sleep(1)  # Prevent tight loop on persistent errors
 
     async def _make_llm_request(self, request: LLMRequest) -> str:
-        """Make actual request to Ollama."""
+        """Make actual request to Ollama with retry logic."""
         if not self.session:
             logger.error("No HTTP session available")
             raise Exception("LLM service not properly initialized")
             
-        try:
-            logger.debug(f"Sending request to Ollama: {self.ollama_url}/api/generate")
-            async with self.session.post(
-                f"{self.ollama_url}/api/generate",
-                json={
-                    "model": request.model,
-                    "prompt": request.prompt,
-                    "stream": False
-                },
-                timeout=aiohttp.ClientTimeout(total=self.timeout)
-            ) as response:
-                logger.debug(f"Ollama response status: {response.status}")
-                response.raise_for_status()
-                result = await response.json()
-                logger.debug("Successfully parsed Ollama response")
-                logger.debug("Ollama response content:")
-                if result.get('response'):
-                    for line in result['response'].split('\n'):
-                        if line.strip():
-                            logger.debug(f"  {line}")
-                return result.get('response', '')
-            
-        except aiohttp.ClientError as e:
-            logger.error(f"Ollama request failed: {str(e)}")
-            raise Exception(f"Ollama service error: {str(e)}")
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                if attempt > 0:
+                    logger.info(f"Retrying LLM request (attempt {attempt + 1}/{self.max_retries})")
+                    await asyncio.sleep(self.retry_delay * attempt)  # Exponential backoff
+                
+                logger.debug(f"Sending request to Ollama: {self.ollama_url}/api/generate")
+                async with self.session.post(
+                    f"{self.ollama_url}/api/generate",
+                    json={
+                        "model": request.model,
+                        "prompt": request.prompt,
+                        "stream": False,
+                        "options": {
+                            "temperature": request.temperature if request.temperature is not None else 0.7,
+                            "max_tokens": request.max_tokens if request.max_tokens is not None else None
+                        }
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.timeout)
+                ) as response:
+                    logger.debug(f"Ollama response status: {response.status}")
+                    response.raise_for_status()
+                    result = await response.json()
+                    logger.debug("Successfully parsed Ollama response")
+                    
+                    if not result.get('response'):
+                        raise Exception("Empty response from Ollama")
+                        
+                    return result['response']
+                    
+            except aiohttp.ClientError as e:
+                last_error = f"Ollama request failed: {str(e)}"
+                logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
+                if attempt == self.max_retries - 1:
+                    raise Exception(f"Ollama service error after {self.max_retries} attempts: {last_error}")
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
+                if attempt == self.max_retries - 1:
+                    raise Exception(f"Unexpected error after {self.max_retries} attempts: {last_error}")
+                    
+        raise Exception(f"All {self.max_retries} attempts failed. Last error: {last_error}")
 
     async def submit_request(self, request: LLMRequest) -> LLMResponse:
         """Submit a request to the queue."""
@@ -884,86 +904,44 @@ async def check_llm_health():
         raise HTTPException(status_code=503, detail=status.error or "LLM service unavailable")
     return {"status": "healthy", "response_time": status.response_time}
 
-@api_router.post("/llm/readme/generate")
-async def generate_readme_content(request: LLMRequest) -> LLMResponse:
-    """Generate content for README files."""
-    logger.info(f"Received README generation request from agent: {request.agent}")
-    logger.info(f"Request details: model={request.model}, max_tokens={request.max_tokens}, temperature={request.temperature}")
-    logger.info("Prompt content:")
-    for line in request.prompt.split('\n'):
-        if line.strip():  # Only log non-empty lines
-            logger.info(f"  {line[:100]}..." if len(line) > 100 else f"  {line}")
-            
-    if request.agent != "readme":
-        logger.error(f"Invalid agent tried to use readme endpoint: {request.agent}")
-        raise HTTPException(status_code=400, detail="Invalid agent for this endpoint")
-        
-    logger.info("Submitting request to LLM service")
-    response = await llm_service.submit_request(request)
+@api_router.post("/llm/generate")
+async def generate_llm_content(request: LLMRequest) -> LLMResponse:
+    """Generic endpoint for LLM content generation.
     
-    if response.error:
-        logger.error(f"LLM error response: {response.error}")
-    else:
-        logger.info("LLM response content:")
-        for line in response.response.split('\n'):
-            if line.strip():
-                logger.info(f"  {line}")
-    
-    return response
-
-@api_router.post("/llm/changelog/generate")
-async def generate_changelog_content(request: LLMRequest) -> LLMResponse:
-    """Generate content for changelog entries."""
-    logger.info(f"Received changelog generation request from agent: {request.agent}")
+    This endpoint replaces agent-specific endpoints and provides a unified
+    interface for all agents to interact with the LLM service.
+    """
+    logger.info(f"Received LLM request from agent: {request.agent}")
     logger.info(f"Request details: model={request.model}, max_tokens={request.max_tokens}, temperature={request.temperature}")
-    logger.info("Prompt content:")
+    
+    # Validate agent permissions
+    if request.agent not in controller.agents:
+        logger.error(f"Unknown agent tried to access LLM: {request.agent}")
+        raise HTTPException(status_code=400, detail="Invalid agent")
+    
+    # Log prompt content at debug level to avoid cluttering logs
+    logger.debug("Prompt content:")
     for line in request.prompt.split('\n'):
         if line.strip():
-            logger.info(f"  {line[:100]}..." if len(line) > 100 else f"  {line}")
-            
-    if request.agent != "changelog":
-        logger.error(f"Invalid agent tried to use changelog endpoint: {request.agent}")
-        raise HTTPException(status_code=400, detail="Invalid agent for this endpoint")
+            logger.debug(f"  {line[:100]}..." if len(line) > 100 else f"  {line}")
+    
+    try:
+        logger.info("Submitting request to LLM service")
+        response = await llm_service.submit_request(request)
         
-    logger.info("Submitting request to LLM service")
-    response = await llm_service.submit_request(request)
-    
-    if response.error:
-        logger.error(f"LLM error response: {response.error}")
-    else:
-        logger.info("LLM response content:")
-        for line in response.response.split('\n'):
-            if line.strip():
-                logger.info(f"  {line}")
-    
-    return response
-
-@api_router.post("/llm/deps/analyze")
-async def analyze_dependencies(request: LLMRequest) -> LLMResponse:
-    """Analyze code dependencies using LLM."""
-    logger.info(f"Received dependency analysis request from agent: {request.agent}")
-    logger.info(f"Request details: model={request.model}, max_tokens={request.max_tokens}, temperature={request.temperature}")
-    logger.info("Prompt content:")
-    for line in request.prompt.split('\n'):
-        if line.strip():
-            logger.info(f"  {line[:100]}..." if len(line) > 100 else f"  {line}")
-            
-    if request.agent != "deps":
-        logger.error(f"Invalid agent tried to use deps endpoint: {request.agent}")
-        raise HTTPException(status_code=400, detail="Invalid agent for this endpoint")
+        if response.error:
+            logger.error(f"LLM error response: {response.error}")
+        else:
+            logger.debug("LLM response content:")
+            for line in response.response.split('\n'):
+                if line.strip():
+                    logger.debug(f"  {line}")
         
-    logger.info("Submitting request to LLM service")
-    response = await llm_service.submit_request(request)
-    
-    if response.error:
-        logger.error(f"LLM error response: {response.error}")
-    else:
-        logger.info("LLM response content:")
-        for line in response.response.split('\n'):
-            if line.strip():
-                logger.info(f"  {line}")
-    
-    return response
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error processing LLM request: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.post("/config/skip-list")
 async def update_skip_list(skip_list: List[str]):
