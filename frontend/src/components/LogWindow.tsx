@@ -54,8 +54,12 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
     return () => clearInterval(interval);
   }, [agents, autoScroll, selectedAgent]);
 
+  const handleClear = () => {
+    setLogs([]);
+  };
+
   return (
-    <div className={`flex flex-col h-[30rem] ${className}`}>
+    <div className={`flex flex-col h-[40rem] ${className}`}>
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold text-white">Agent Activity</h2>
@@ -71,16 +75,27 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
               </option>
             ))}
           </select>
+          <button
+            onClick={handleClear}
+            className="px-2 py-1 rounded text-xs font-medium bg-slate-700 text-slate-300 hover:bg-slate-600"
+          >
+            Clear Logs
+          </button>
         </div>
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={autoScroll}
-            onChange={(e) => setAutoScroll(e.target.checked)}
-            className="rounded border-slate-700 bg-slate-900 text-green-500 focus:ring-0"
-          />
-          <span className="text-sm text-slate-300">Auto-scroll</span>
-        </label>
+        <div className="flex items-center gap-4">
+          <span className="text-xs text-slate-400">
+            {logs.length} messages
+          </span>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={autoScroll}
+              onChange={(e) => setAutoScroll(e.target.checked)}
+              className="rounded border-slate-700 bg-slate-900 text-green-500 focus:ring-0"
+            />
+            <span className="text-sm text-slate-300">Auto-scroll</span>
+          </label>
+        </div>
       </div>
       
       <div
@@ -98,6 +113,10 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
             const agentMatch = log.match(/agent_code_mon_(\w+)\.py/);
             const agentName = agentMatch ? agentMatch[1] : '';
             
+            // Extract timestamp for better formatting
+            const timestamp = log.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)?.[0];
+            const message = log.replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - /, '');
+            
             return (
               <pre
                 key={index}
@@ -107,7 +126,10 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
                       isInfo ? 'text-green-300' :
                         'text-slate-300'}`}
               >
-                {/* Add agent name highlight */}
+                {/* Timestamp */}
+                <span className="text-slate-500">{timestamp}</span>
+                {' '}
+                {/* Agent name highlight */}
                 {agentName && (
                   <span className={`font-semibold ${
                     isError ? 'text-red-200' :
@@ -119,7 +141,8 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
                   </span>
                 )}
                 {' '}
-                {log}
+                {/* Message content */}
+                {message}
               </pre>
             );
           })}

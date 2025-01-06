@@ -20,10 +20,17 @@ class WebSocketClient {
   private url = 'ws://localhost:8000/ws';
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
+  private backendAvailable = true;
 
   connect() {
     if (this.ws?.readyState === WebSocket.OPEN) {
       console.log('WebSocket already connected');
+      return;
+    }
+
+    // Don't try to connect if backend is known to be down
+    if (!this.backendAvailable) {
+      console.log('Backend is not available, skipping WebSocket connection attempt');
       return;
     }
 
@@ -35,6 +42,7 @@ class WebSocketClient {
       this.ws.onopen = () => {
         console.log('WebSocket connected successfully');
         this.reconnectAttempts = 0;
+        this.backendAvailable = true;
         this.updateStatus('connected');
       };
 
@@ -56,46 +64,44 @@ class WebSocketClient {
           wasClean: event.wasClean
         });
         this.updateStatus('disconnected');
-        this.scheduleReconnect();
+        this.checkBackendAndReconnect();
       };
 
       this.ws.onerror = (event) => {
-        // Log the entire event since the error details might be in different properties
-        console.error('WebSocket error event:', {
-          type: event.type,
-          eventPhase: event.eventPhase,
-          currentTarget: event.currentTarget,
-          target: event.target,
-          timeStamp: event.timeStamp,
-          // Try to get any additional properties that might contain error info
-          ...(event as any)
-        });
-        
-        // Check if we can connect to the backend at all
-        this.checkBackendAvailability();
-        
+        console.error('WebSocket connection failed');
         this.updateStatus('error');
         this.ws?.close();
+        this.checkBackendAndReconnect();
       };
 
     } catch (error) {
       console.error('Error creating WebSocket connection:', error);
       this.updateStatus('error');
-      this.scheduleReconnect();
+      this.checkBackendAndReconnect();
     }
   }
 
-  private async checkBackendAvailability() {
+  private async checkBackendAndReconnect() {
     try {
-      // Try to fetch from the HTTP endpoint to check if backend is running
+      console.log('Checking backend availability...');
       const response = await fetch('http://localhost:8000/api/info');
-      if (!response.ok) {
-        console.error('Backend server returned error:', response.status);
+      
+      if (response.ok) {
+        console.log('Backend is available, scheduling reconnect');
+        this.backendAvailable = true;
+        this.scheduleReconnect();
       } else {
-        console.log('Backend server is running');
+        console.error('Backend returned error:', response.status);
+        this.backendAvailable = false;
+        this.updateStatus('error');
       }
     } catch (error) {
-      console.error('Backend server appears to be down:', error);
+      console.error('Backend appears to be down:', error);
+      this.backendAvailable = false;
+      this.updateStatus('error');
+      
+      // Schedule a check for backend availability
+      setTimeout(() => this.checkBackendAndReconnect(), 5000);
     }
   }
 

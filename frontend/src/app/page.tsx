@@ -73,10 +73,30 @@ export default function Home() {
     );
   }
 
-  if (error) {
+  if (error || wsStatus === 'error') {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-red-300">Error: {error}</div>
+      <div className="min-h-screen bg-slate-900 text-white p-8">
+        <div className="max-w-6xl mx-auto">
+          <div className="rounded-lg border border-red-900/50 bg-red-900/10 p-8 text-center">
+            <h2 className="text-2xl font-bold text-red-300 mb-4">
+              Connection Error
+            </h2>
+            <p className="text-red-200 mb-6">
+              {error || "Unable to connect to the backend server. Please ensure:"}
+            </p>
+            <ul className="text-red-200 text-left max-w-md mx-auto space-y-2 mb-8">
+              <li>1. The backend server is running (<code className="bg-red-900/50 px-2 py-0.5 rounded">python agent_swarm_controller.py</code>)</li>
+              <li>2. The server is accessible at <code className="bg-red-900/50 px-2 py-0.5 rounded">http://localhost:8000</code></li>
+              <li>3. There are no firewall restrictions blocking the connection</li>
+            </ul>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 rounded bg-red-900/50 text-red-200 hover:bg-red-900 transition-colors"
+            >
+              Retry Connection
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
