@@ -1,75 +1,149 @@
-# code_swarm
-AI Agents that assist with programming tasks
+# Code Swarm
+
+AI Agents that assist with programming tasks, with a modern web interface for monitoring and control.
 
 ![logo](logo.png)
 
-## Python Code Monitor Agents
+## Overview
 
-### CHANGELOG Agent (agent_code_mon_changelog.py)
+Code Swarm is a suite of AI-powered programming assistants that help maintain and document your Python codebase. It consists of:
 
-A Git-aware Python file monitoring agent that automatically analyzes code changes and maintains per-file changelogs. This tool helps track code evolution by monitoring Python files in a directory, analyzing changes, and maintaining detailed changelog files for each monitored file.
+1. A set of specialized Python agents for different tasks
+2. A central controller that manages the agents
+3. A modern web interface for monitoring and control
 
-- 🔍 Real-time monitoring of Python files in a directory and its subdirectories
-- 📊 Multiple analysis metrics:
-  - Syntax correctness
-  - Style consistency with other project files
-  - Code complexity based on changes
-  - PEP standards compliance using Pylint
-- 🤖 Optional AI-powered change analysis using Ollama
-- 📝 Automatic changelog generation for each Python file
-- 🔄 Git integration for tracking changes
-- ⚙️ Configurable via config.ini
+## Components
 
-### README Agent (agent_code_mon_readme.py)
+### Backend
 
-An intelligent documentation agent that automatically generates and maintains README files for Python modules. It analyzes Python files in real-time and creates comprehensive, up-to-date documentation that stays consistent with your code.
+#### Swarm Controller
 
-- 📝 Automatic README generation for each Python file
-- 🔍 Extracts and organizes:
-  - Module overview and purpose
-  - Function documentation
-  - Class and method descriptions
-  - Dependencies
-- 🤖 Optional AI-powered summaries using Ollama
-- 🔄 Maintains documentation consistency across updates
-- ⚙️ Configurable via config.ini
+The central server that manages all agents and provides API endpoints. Features:
+- RESTful API for agent control
+- WebSocket for real-time updates
+- Ollama integration for AI features
+- Centralized path monitoring
 
-### Dependency Graph Agent (agent_code_mon_deps.py)
+#### Python Agents
 
-A visualization agent that automatically maps and tracks dependencies between Python files in your project. It creates and maintains dynamic dependency graphs showing how your modules interact.
+1. **CHANGELOG Agent** (agent_code_mon_changelog.py)
+   - Monitors file changes
+   - Analyzes code modifications
+   - Maintains detailed changelogs
+   - Git-aware (optional)
 
-- 📊 Real-time dependency visualization using Mermaid diagrams
-- 🔍 Detects multiple types of dependencies:
-  - Direct imports
-  - Class inheritance
-  - Type annotations
-  - Module usage patterns
-- 📁 Directory-aware grouping
-- 🌳 Configurable search depth
-- 🎨 Customizable diagram layouts
-- 📝 Detailed dependency documentation
+2. **README Agent** (agent_code_mon_readme.py)
+   - Generates module documentation
+   - Updates READMEs automatically
+   - Maintains API documentation
+   - AI-powered summaries
 
-### Each agent will:
+3. **Dependency Graph Agent** (agent_code_mon_deps.py)
+   - Maps project dependencies
+   - Creates visual graphs
+   - Tracks module relationships
+   - Updates in real-time
 
-- Monitor your Python files for changes
-- Generate/update documentation files automatically
-- Provide analysis and insights about your code
-- Create separate documentation files:
-  - filename.py_CHANGELOG.md for change history
-  - filename.py_README.md for module documentation
-  - dependency_graph.md for project-wide dependency visualization
+### Frontend
 
-### AI Integration
+A Next.js web application that provides:
+- Real-time agent status monitoring
+- Centralized path management
+- Live updates via WebSocket
+- Dark-themed, responsive interface
 
-Both agents can optionally use Ollama for AI-powered analysis:
+## Requirements
 
-1. Install Ollama from ollama.ai
-2. Run the Ollama service
-3. The agents will automatically use it if available
-
-### Requirements
-
+### Backend
 - Python 3.6+
-- Git repository
+- Git (optional)
 - Required Python packages (see requirements.txt)
-- Ollama (optional, for AI analysis)
+- Ollama (optional, for AI features)
+
+### Frontend
+- Node.js 18+
+- npm or yarn
+- Modern web browser
+
+## Quick Start
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/code_swarm.git
+   cd code_swarm
+   ```
+
+2. Install backend dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Install frontend dependencies:
+   ```bash
+   cd frontend
+   npm install
+   cd ..
+   ```
+
+4. Start the backend server:
+   ```bash
+   python agent_swarm_controller.py
+   ```
+
+5. In a new terminal, start the frontend:
+   ```bash
+   cd frontend
+   npm run dev
+   ```
+
+6. Open http://localhost:3000 in your browser
+
+## Configuration
+
+### Backend Configuration (config.ini)
+- Monitor path settings
+- Agent-specific configurations
+- Ollama settings
+- Server options
+
+### Frontend Configuration
+- API endpoint: http://localhost:8000/api
+- WebSocket: ws://localhost:8000/ws
+- Ollama endpoint: http://localhost:11434
+
+## Development
+
+See individual README files in:
+- [Frontend Documentation](frontend/README.md)
+- [Backend Documentation](docs/backend.md)
+
+## Troubleshooting
+
+### Common Issues
+
+1. Agent Start/Stop Issues
+   - Check file permissions
+   - Verify Ollama is running (if using AI)
+   - Review agent logs
+
+2. WebSocket Connection
+   - Ensure backend is running
+   - Check port availability
+   - Monitor connection status
+
+3. Path Monitoring
+   - Use absolute paths
+   - Verify directory permissions
+   - Check agent logs
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
+
+## License
+
+[Add your license here]

@@ -104,5 +104,25 @@ export const agentsApi = {
     } catch (error) {
       return handleApiError(error);
     }
+  },
+
+  // Get initial configuration
+  getConfig: async () => {
+    try {
+      const response = await api.get('/info');
+      return response.data;
+    } catch (error) {
+      return handleApiError(error);
+    }
+  },
+
+  // Get agent logs
+  getAgentLogs: async (agentName: string, lines: number = 100) => {
+    try {
+      const response = await api.get(`/agents/${agentName}/logs?lines=${lines}`);
+      return response.data;
+    } catch (error) {
+      return handleApiError(error);
+    }
   }
 }; 
