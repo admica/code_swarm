@@ -24,7 +24,8 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
   const [connectionAttempts, setConnectionAttempts] = useState(0);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const autoScrollAnchorRef = useRef<HTMLDivElement>(null);
 
   const MAX_LOGS = 1000; // Maximum number of logs to keep in memory
   const MAX_RETRY_ATTEMPTS = 5;
@@ -37,7 +38,12 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
       // Keep only the last MAX_LOGS entries
       return updated.slice(-MAX_LOGS);
     });
-  }, [MAX_LOGS]);
+
+    // Scroll to bottom if auto-scroll is enabled
+    if (autoScroll && autoScrollAnchorRef.current) {
+      autoScrollAnchorRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [autoScroll, MAX_LOGS]);
 
   const connectWebSocket = useCallback(() => {
     try {
@@ -67,10 +73,6 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
         const log = parseBackendLog(event.data);
         if (log) {
           addLog(log);
-          
-          if (autoScroll && logContainerRef.current) {
-            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-          }
         }
       };
 
@@ -264,28 +266,29 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
       </div>
       <div
         ref={logContainerRef}
-        className="flex-1 overflow-auto bg-slate-900 rounded p-4"
+        className="flex-1 overflow-auto bg-slate-900/50 border border-slate-800 rounded-lg p-2 min-h-[300px] max-h-[500px]"
       >
-        {filteredLogs.map((log, index) => (
-          <div key={index} className="mb-2">
-            <span className="text-xs text-slate-500">
-              {new Date(log.timestamp).toLocaleTimeString()}
-            </span>
-            <span className="ml-2 text-sm">
-              <span className="text-slate-400">[{log.agent || 'unknown'}]</span>
-              <span className={`ml-2 ${
+        <div className="font-mono text-xs leading-4">
+          {filteredLogs.map((log, index) => (
+            <div key={index} className="flex items-start hover:bg-slate-800/30">
+              <span className="text-slate-500 shrink-0 w-14 pl-1">
+                {new Date(log.timestamp).toLocaleTimeString().split(':').slice(0, 2).join(':')}
+              </span>
+              <span className="text-slate-400 shrink-0 w-16 px-1">[{log.agent || 'sys'}]</span>
+              <span className={`${
                 log.level === 'error' ? 'text-red-300' :
                 log.level === 'warning' ? 'text-yellow-300' :
                 'text-slate-300'
-              }`}>
+              } break-all`}>
                 {log.content}
+                {log.details && (
+                  <span className="text-slate-500 ml-1">({log.details})</span>
+                )}
               </span>
-              {log.details && (
-                <span className="ml-2 text-slate-500">({log.details})</span>
-              )}
-            </span>
-          </div>
-        ))}
+            </div>
+          ))}
+          <div ref={autoScrollAnchorRef} />
+        </div>
       </div>
     </div>
   );

@@ -114,7 +114,7 @@ class CodeAnalyzer:
         """
         if not self.repo:
             return ""
-            
+
         try:
             if not self.repo.head.is_valid():
                 logger.info(f"No commits yet in repository for {file_path}")
@@ -311,13 +311,13 @@ Keep the response under 200 words."""
 
             response.raise_for_status()
             result = response.json()
-            
+
             if result.get('error'):
                 logger.warning(f"LLM error: {result['error']}")
                 return None
-                
+
             return result.get('response')
-            
+
         except requests.exceptions.RequestException as e:
             logger.warning(f"Controller service error: {e}")
             return None
@@ -444,7 +444,7 @@ def main(path: str) -> None:
     try:
         logger.info("Starting changelog agent")
         logger.info(f"Monitoring path: {path}")
-        
+
         logger.debug("Loading configuration")
         config_manager = ConfigManager()
         config = config_manager.get_config()
@@ -452,14 +452,14 @@ def main(path: str) -> None:
 
         logger.debug("Initializing code analyzer")
         analyzer = CodeAnalyzer(path, config)
-        
+
         logger.debug("Setting up file handler")
         event_handler = PyFileHandler(analyzer)
-        
+
         logger.debug("Initializing file system observer")
         observer = Observer()
         observer.schedule(event_handler, path, recursive=True)
-        
+
         logger.info("Starting file system observer")
         observer.start()
 

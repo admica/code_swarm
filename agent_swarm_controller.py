@@ -99,12 +99,12 @@ class LLMMetrics:
         self.total_requests += 1
         self.total_processing_time += processing_time
         self.total_queue_time += queue_time
-        
+
         if success:
             self.successful_requests += 1
         else:
             self.failed_requests += 1
-            
+
         self.requests_by_agent[agent] = self.requests_by_agent.get(agent, 0) + 1
 
     def get_metrics(self) -> Dict:
@@ -117,7 +117,7 @@ class LLMMetrics:
             self.total_queue_time / self.total_requests 
             if self.total_requests > 0 else 0
         )
-        
+
         return {
             "total_requests": self.total_requests,
             "successful_requests": self.successful_requests,
@@ -141,7 +141,7 @@ class LLMStatus(BaseModel):
 
 class LLMService:
     """Handles LLM requests with queueing and metrics tracking."""
-    
+
     def __init__(self):
         self.queue = asyncio.Queue()
         self.metrics = LLMMetrics()
@@ -151,7 +151,7 @@ class LLMService:
         self.session: Optional[aiohttp.ClientSession] = None
         self.max_retries = 3
         self.retry_delay = 1.0  # seconds
-        
+
     async def start(self):
         """Start the queue processing task and create HTTP session."""
         if not self.processing_task:
@@ -181,14 +181,14 @@ class LLMService:
                 request, future, enqueue_time = await self.queue.get()
                 queue_time = time.time() - enqueue_time
                 logger.info(f"Processing request from agent '{request.agent}' (queued for {queue_time:.2f}s)")
-                
+
                 try:
                     start_time = time.time()
                     logger.info(f"Making LLM request to Ollama: model={request.model}, prompt_length={len(request.prompt)}")
                     response = await self._make_llm_request(request)
                     processing_time = time.time() - start_time
                     logger.info(f"LLM request completed in {processing_time:.2f}s")
-                    
+
                     # Record metrics
                     self.metrics.record_request(
                         request.agent,
@@ -196,7 +196,7 @@ class LLMService:
                         processing_time=processing_time,
                         queue_time=queue_time
                     )
-                    
+
                     # Create response object
                     llm_response = LLMResponse(
                         response=response,
@@ -205,15 +205,15 @@ class LLMService:
                         queue_time=queue_time,
                         timestamp=datetime.now()
                     )
-                    
+
                     future.set_result(llm_response)
                     logger.info("Response sent back to agent")
-                    
+
                 except Exception as e:
                     error_msg = str(e)
                     logger.error(f"Error processing LLM request: {error_msg}")
                     logger.error(f"Request details: agent={request.agent}, model={request.model}")
-                    
+
                     # Record failed request
                     self.metrics.record_request(
                         request.agent,
@@ -221,7 +221,7 @@ class LLMService:
                         processing_time=0.0,
                         queue_time=queue_time
                     )
-                    
+
                     # Create error response
                     llm_response = LLMResponse(
                         response=None,
@@ -230,13 +230,13 @@ class LLMService:
                         queue_time=queue_time,
                         timestamp=datetime.now()
                     )
-                    
+
                     future.set_result(llm_response)
                     logger.info("Error response sent back to agent")
-                    
+
                 finally:
                     self.queue.task_done()
-                    
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -248,14 +248,14 @@ class LLMService:
         if not self.session:
             logger.error("No HTTP session available")
             raise Exception("LLM service not properly initialized")
-            
+
         last_error = None
         for attempt in range(self.max_retries):
             try:
                 if attempt > 0:
                     logger.info(f"Retrying LLM request (attempt {attempt + 1}/{self.max_retries})")
                     await asyncio.sleep(self.retry_delay * attempt)  # Exponential backoff
-                
+
                 logger.debug(f"Sending request to Ollama: {self.ollama_url}/api/generate")
                 async with self.session.post(
                     f"{self.ollama_url}/api/generate",
@@ -274,12 +274,12 @@ class LLMService:
                     response.raise_for_status()
                     result = await response.json()
                     logger.debug("Successfully parsed Ollama response")
-                    
+
                     if not result.get('response'):
                         raise Exception("Empty response from Ollama")
-                        
+
                     return result['response']
-                    
+
             except aiohttp.ClientError as e:
                 last_error = f"Ollama request failed: {str(e)}"
                 logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
@@ -290,7 +290,7 @@ class LLMService:
                 logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
                 if attempt == self.max_retries - 1:
                     raise Exception(f"Unexpected error after {self.max_retries} attempts: {last_error}")
-                    
+
         raise Exception(f"All {self.max_retries} attempts failed. Last error: {last_error}")
 
     async def submit_request(self, request: LLMRequest) -> LLMResponse:
@@ -307,7 +307,7 @@ class LLMService:
         """Get current LLM status including available models."""
         if not self.session:
             self.session = aiohttp.ClientSession()
-            
+
         try:
             start_time = time.time()
             async with self.session.get(
@@ -315,7 +315,7 @@ class LLMService:
                 timeout=aiohttp.ClientTimeout(total=5)
             ) as response:
                 response_time = time.time() - start_time
-                
+
                 if response.status == 200:
                     data = await response.json()
                     models = [model["name"] for model in data.get("models", [])]
@@ -334,7 +334,7 @@ class LLMService:
                         model=None,
                         models=None
                     )
-                    
+
         except aiohttp.ClientError as e:
             return LLMStatus(
                 available=False,
@@ -357,11 +357,11 @@ class SwarmController:
     def __init__(self):
         self.config = configparser.ConfigParser()
         self.config.read('config.ini')
-        
+
         self.monitor_path = self.config.get('swarm_controller', 'monitor_path', fallback=None)
         self.skip_list = self.config.get('swarm_controller', 'skip_list', fallback='').split(',')
         self.skip_list = [path.strip() for path in self.skip_list if path.strip()]
-        
+
         # Initialize agents dictionary
         self.agents = {
             'agent_code_mon_changelog': {
@@ -405,7 +405,7 @@ class SwarmController:
         try:
             if not self.config.has_section('swarm_controller'):
                 self.config.add_section('swarm_controller')
-            
+
             with open('config.ini', 'w') as configfile:
                 self.config.write(configfile)
         except Exception as e:
@@ -429,16 +429,16 @@ class SwarmController:
         """Update the skip list configuration."""
         try:
             self.skip_list = skip_list
-            
+
             # Update config file
             if not self.config.has_section('swarm_controller'):
                 self.config.add_section('swarm_controller')
-            
+
             self.config['swarm_controller']['skip_list'] = ','.join(skip_list)
-            
+
             with open('config.ini', 'w') as configfile:
                 self.config.write(configfile)
-            
+
             return {"success": True, "skip_list": skip_list}
         except Exception as e:
             logger.error(f"Error updating skip list: {e}")
@@ -460,7 +460,7 @@ class SwarmController:
         try:
             # Convert to absolute path and resolve any symlinks
             abs_path = os.path.abspath(os.path.expanduser(path))
-            
+
             # Check if path exists and is accessible
             if not os.path.exists(abs_path):
                 return {"error": f"Path does not exist: {abs_path}"}
@@ -468,19 +468,19 @@ class SwarmController:
                 return {"error": f"Path is not a directory: {abs_path}"}
             if not os.access(abs_path, os.R_OK):
                 return {"error": f"Path is not readable: {abs_path}"}
-            
+
             # Store the new path
             old_path = self.monitor_path
             self.monitor_path = abs_path
-            
+
             # Update config file
             self.config['swarm_controller']['monitor_path'] = abs_path
             self._save_config()
-            
+
             # Restart agents if they were running
             running_agents = [name for name, agent in self.agents.items() 
                             if agent["status"].running]
-            
+
             if running_agents and old_path != abs_path:
                 self.stop_all()
                 self.start_all(abs_path)
@@ -488,9 +488,9 @@ class SwarmController:
                     "success": f"Monitor path set to: {abs_path}",
                     "restarted_agents": running_agents
                 }
-            
+
             return {"success": f"Monitor path set to: {abs_path}"}
-            
+
         except Exception as e:
             return {"error": f"Failed to set monitor path: {str(e)}"}
 
@@ -521,21 +521,21 @@ class SwarmController:
             raise ValueError(f"Invalid monitor path: {str(e)}")
 
         agent = self.agents[agent_name]
-        
+
         if agent["process"] and agent["process"].poll() is None:
             logger.warning(f"Agent {agent_name} is already running with PID {agent['process'].pid}")
             return agent["status"]
 
         try:
             logger.info(f"Starting agent {agent_name} with path: {monitor_path}")
-            
+
             # Get the absolute path to the agent script
             script_path = os.path.abspath(agent["script"])
             if not os.path.exists(script_path):
                 raise ValueError(f"Agent script not found: {script_path}")
-                
+
             logger.debug(f"Agent script path: {script_path}")
-            
+
             # Start the agent process
             process = subprocess.Popen(
                 [sys.executable, script_path, monitor_path],
@@ -543,7 +543,7 @@ class SwarmController:
                 stderr=subprocess.PIPE,
                 text=True
             )
-            
+
             # Wait a moment to check if process started successfully
             time.sleep(0.5)
             if process.poll() is not None:
@@ -554,16 +554,16 @@ class SwarmController:
                 agent["status"].last_error = stderr or "Failed to start"
                 agent["status"].running = False
                 raise Exception(f"Agent failed to start: {stderr}")
-            
+
             agent["process"] = process
             agent["status"].pid = process.pid
             agent["status"].running = True
             agent["status"].monitor_path = monitor_path
             agent["status"].last_error = None
-            
+
             logger.info(f"Successfully started agent {agent_name} with PID {process.pid}")
             return agent["status"]
-            
+
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Error starting agent {agent_name}: {error_msg}")
@@ -579,32 +579,32 @@ class SwarmController:
 
         agent = self.agents[agent_name]
         logger.info(f"Attempting to stop agent {agent_name}")
-        
+
         if agent["process"]:
             try:
                 logger.debug(f"Found process for {agent_name} with PID {agent['process'].pid}")
                 process = psutil.Process(agent["process"].pid)
-                
+
                 # Log children processes before termination
                 children = process.children(recursive=True)
                 if children:
                     logger.debug(f"Found {len(children)} child processes to terminate")
-                
+
                 for child in children:
                     logger.debug(f"Terminating child process {child.pid}")
                     child.terminate()
-                
+
                 logger.debug(f"Terminating main process {process.pid}")
                 process.terminate()
-                
+
                 process.wait(timeout=5)
                 logger.info(f"Successfully stopped agent {agent_name}")
-                
+
                 agent["process"] = None
                 agent["status"].pid = None
                 agent["status"].running = False
                 agent["status"].last_error = None
-                
+
             except psutil.NoSuchProcess:
                 logger.warning(f"Process for agent {agent_name} no longer exists")
                 agent["process"] = None
@@ -624,7 +624,7 @@ class SwarmController:
             raise ValueError(f"Unknown agent: {agent_name}")
 
         agent = self.agents[agent_name]
-        
+
         # Update status based on process state
         if agent["process"]:
             try:
@@ -667,11 +667,11 @@ class SwarmController:
         """Read recent log entries for an agent."""
         if agent_name not in self.agents:
             raise ValueError(f"Unknown agent: {agent_name}")
-            
+
         log_file = f"agent_code_mon_{agent_name}.log"
         if not os.path.exists(log_file):
             return []
-            
+
         try:
             with open(log_file, 'r') as f:
                 return list(reversed(f.readlines()[-lines:]))
@@ -766,7 +766,7 @@ async def get_llm_metrics():
 @api_router.post("/agents/{agent_name}/start")
 async def start_agent(agent_name: str, path: str = None):
     """Start a specific agent.
-    
+
     Args:
         agent_name: Name of the agent to start
         path: Path to monitor. Required if no default path is configured.
@@ -777,7 +777,7 @@ async def start_agent(agent_name: str, path: str = None):
                 status_code=400,
                 detail="Path parameter is required when no default path is configured"
             )
-        
+
         status = controller.start_agent(agent_name, path)
         return status
     except ValueError as e:
@@ -821,7 +821,7 @@ async def start_all_agents(path: str = None):
     actual_path = path if path is not None else controller.monitor_path
     if actual_path is None:
         raise HTTPException(status_code=400, detail="No monitor path configured")
-    
+
     statuses = controller.start_all(actual_path)
     return statuses
 
@@ -850,28 +850,28 @@ async def check_llm_health():
 @api_router.post("/llm/generate")
 async def generate_llm_content(request: LLMRequest) -> LLMResponse:
     """Generic endpoint for LLM content generation.
-    
+
     This endpoint replaces agent-specific endpoints and provides a unified
     interface for all agents to interact with the LLM service.
     """
     logger.info(f"Received LLM request from agent: {request.agent}")
     logger.info(f"Request details: model={request.model}, max_tokens={request.max_tokens}, temperature={request.temperature}")
-    
+
     # Validate agent permissions
     if request.agent not in controller.agents:
         logger.error(f"Unknown agent tried to access LLM: {request.agent}")
         raise HTTPException(status_code=400, detail="Invalid agent")
-    
+
     # Log prompt content at debug level to avoid cluttering logs
     logger.debug("Prompt content:")
     for line in request.prompt.split('\n'):
         if line.strip():
             logger.debug(f"  {line[:100]}..." if len(line) > 100 else f"  {line}")
-    
+
     try:
         logger.info("Submitting request to LLM service")
         response = await llm_service.submit_request(request)
-        
+
         if response.error:
             logger.error(f"LLM error response: {response.error}")
         else:
@@ -879,9 +879,9 @@ async def generate_llm_content(request: LLMRequest) -> LLMResponse:
             for line in response.response.split('\n'):
                 if line.strip():
                     logger.debug(f"  {line}")
-        
+
         return response
-        
+
     except Exception as e:
         logger.error(f"Error processing LLM request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -913,12 +913,12 @@ async def set_ai_markers(begin: str, end: str):
     try:
         if not controller.config.has_section('agent_code_mon_readme'):
             controller.config.add_section('agent_code_mon_readme')
-        
+
         controller.config['agent_code_mon_readme']['ai_marker_begin'] = begin
         controller.config['agent_code_mon_readme']['ai_marker_end'] = end
-        
+
         controller._save_config()
-        
+
         return {"success": True, "begin": begin, "end": end}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -933,10 +933,10 @@ async def websocket_logs(websocket: WebSocket):
     try:
         await websocket.accept()
         logger.info("New client connected to log stream")
-        
+
         async def tail_log(file_path: Path):
             """Tail a log file and send updates via WebSocket.
-            
+
             Handles cases where:
             - File doesn't exist yet (waits for creation)
             - File is deleted while tailing
@@ -952,7 +952,7 @@ async def websocket_logs(websocket: WebSocket):
                     async with aiofiles.open(file_path, 'r') as f:
                         # Seek to end initially
                         await f.seek(0, 2)
-                        
+
                         while True:
                             line = await f.readline()
                             if not line:
@@ -961,7 +961,7 @@ async def websocket_logs(websocket: WebSocket):
                                     break
                                 await asyncio.sleep(0.1)
                                 continue
-                                
+
                             try:
                                 await websocket.send_text(line.strip())
                             except WebSocketDisconnect:
@@ -971,7 +971,7 @@ async def websocket_logs(websocket: WebSocket):
                                 logger.error(f"Error sending log from {file_path}: {e}")
                                 # Continue trying to send other logs
                                 continue
-                                
+
                 except FileNotFoundError:
                     # File was deleted, wait for recreation
                     logger.warning(f"Log file deleted: {file_path}, waiting for recreation")
@@ -989,19 +989,19 @@ async def websocket_logs(websocket: WebSocket):
             log_dir = Path('logs')
             log_dir.mkdir(exist_ok=True)
             tasks = []
-            
+
             # Send initial connection message
             await websocket.send_text(
                 f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - system - INFO - Connected to log stream"
             )
-            
+
             # Controller log
             controller_log = log_dir / 'swarm_controller.log'
             tasks.append(asyncio.create_task(
                 tail_log(controller_log),
                 name=f"tail_{controller_log.name}"
             ))
-            
+
             # Agent logs
             for agent_name in controller.agents:
                 agent_log = log_dir / f'agent_{agent_name}.log'
@@ -1009,9 +1009,9 @@ async def websocket_logs(websocket: WebSocket):
                     tail_log(agent_log),
                     name=f"tail_{agent_log.name}"
                 ))
-            
+
             logger.info(f"Started {len(tasks)} log tailing tasks")
-            
+
             try:
                 # Wait for all tasks or client disconnect
                 await asyncio.gather(*tasks)
@@ -1027,7 +1027,7 @@ async def websocket_logs(websocket: WebSocket):
                             await task
                         except asyncio.CancelledError:
                             pass
-            
+
         except Exception as e:
             error_msg = f"Error setting up log streaming: {e}"
             logger.error(error_msg)
@@ -1035,7 +1035,7 @@ async def websocket_logs(websocket: WebSocket):
                 f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - system - ERROR - {error_msg}"
             )
             raise
-            
+
     except WebSocketDisconnect:
         logger.info("Client disconnected from log stream")
     except Exception as e:

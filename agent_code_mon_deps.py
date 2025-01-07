@@ -337,10 +337,10 @@ class DependencyAnalyzer:
 
     async def get_ai_insights(self, dependencies: Dict[str, List[str]]) -> Optional[str]:
         """Get AI insights about the dependency structure using LLM.
-        
+
         Args:
             dependencies: Dictionary mapping files to their dependencies
-            
+
         Returns:
             AI analysis text or None if disabled or service unavailable
         """
@@ -402,7 +402,7 @@ Keep the response under 200 words."""
                 max_tokens=1000,
                 temperature=0.7
             )
-            
+
             return result.get('response') if result else None
 
         except Exception as e:
@@ -431,12 +431,12 @@ class DependencyVisualizer:
             vis_path = os.path.join(self.analyzer.root_path, 'dependency_graph.md')
             with open(vis_path, 'w') as f:
                 f.write("# Project Dependency Graph\n\n")
-                
+
                 if ai_insights:
                     f.write("## AI Analysis\n\n")
                     f.write(ai_insights)
                     f.write("\n\n")
-                
+
                 f.write("## Visualization\n\n")
                 f.write("```mermaid\n")
                 f.write(mermaid)

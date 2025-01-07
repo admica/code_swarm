@@ -36,7 +36,7 @@ class CodeAnalyzer:
         """Analyze code and extract key information."""
         try:
             tree = ast.parse(content)
-            
+
             # Extract module-level information
             module_info = {
                 'docstring': self.extract_docstring(tree),
@@ -44,7 +44,7 @@ class CodeAnalyzer:
                 'functions': [],
                 'imports': []
             }
-            
+
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
                     class_info = {
@@ -52,7 +52,7 @@ class CodeAnalyzer:
                         'docstring': self.extract_docstring(node),
                         'methods': []
                     }
-                    
+
                     for subnode in node.body:
                         if isinstance(subnode, ast.FunctionDef):
                             method_info = {
@@ -61,9 +61,9 @@ class CodeAnalyzer:
                                 'args': [arg.arg for arg in subnode.args.args if arg.arg != 'self']
                             }
                             class_info['methods'].append(method_info)
-                            
+
                     module_info['classes'].append(class_info)
-                    
+
                 elif isinstance(node, ast.FunctionDef) and node.name != '__init__':
                     function_info = {
                         'name': node.name,
@@ -71,7 +71,7 @@ class CodeAnalyzer:
                         'args': [arg.arg for arg in node.args.args]
                     }
                     module_info['functions'].append(function_info)
-                    
+
                 elif isinstance(node, (ast.Import, ast.ImportFrom)):
                     if isinstance(node, ast.Import):
                         for name in node.names:
@@ -80,9 +80,9 @@ class CodeAnalyzer:
                         module = node.module or ''
                         for name in node.names:
                             module_info['imports'].append(f"{module}.{name.name}")
-            
+
             return module_info
-            
+
         except SyntaxError as e:
             logger.error(f"Syntax error in code: {e}")
             return {}
@@ -92,7 +92,7 @@ class CodeAnalyzer:
 
     async def get_ai_analysis(self, code_info: Dict[str, any], old_content: Optional[str] = None) -> Optional[str]:
         """Get AI analysis of the code using LLM.
-        
+
         Args:
             code_info: Analyzed code information (from analyze_code)
         """
@@ -108,7 +108,7 @@ class CodeAnalyzer:
                              'docstring': f['docstring'].split('.')[0] if f['docstring'] else ''}
                             for f in code_info.get('functions', [])]
             }
-            
+
             # Build a concise prompt
             prompt = f"""Analyze this module and generate a README overview:
 
@@ -132,17 +132,17 @@ Keep the response focused and under 250 words."""
                 max_tokens=1100,
                 temperature=0.6
             )
-            
+
             if result and result.get('response'):
                 # Get the response without any markers that might have been included
                 ai_response = result['response'].strip()
                 ai_response = ai_response.replace('(BEGIN AI Generated)', '')
                 ai_response = ai_response.replace('(END AI Generated)', '')
                 ai_response = ai_response.strip()
-                
+
                 # Add the markers properly
                 return f"(BEGIN AI Generated)\n{ai_response}\n(END AI Generated)"
-            
+
             return None
 
         except Exception as e:
@@ -160,28 +160,28 @@ class ReadmeGenerator:
         """Generate a complete README.md for a code file."""
         old_readme = None
         readme_path = f"{file_path}_README.md"
-        
+
         if os.path.exists(readme_path):
             with open(readme_path, 'r') as f:
                 old_readme = f.read()
-        
+
         # Analyze the code
         info = self.analyzer.analyze_code(content)
-        
+
         # Start with file name
         readme = f"# {os.path.basename(file_path)}\n\n"
-        
+
         # Overview section
         readme += "## Overview\n\n"
-        
+
         # Add docstring if available
         if info.get('docstring'):
             docstring = info['docstring'].strip()
             readme += f"{docstring}\n\n"
-        
+
         # Get AI summary and generated content
         ai_summary = await self.analyzer.get_ai_analysis(info, old_readme)
-        
+
         # If we have an old readme, preserve non-AI content
         if old_readme and "## Overview" in old_readme:
             try:
@@ -198,23 +198,23 @@ class ReadmeGenerator:
                         readme += f"{overview_content}\n\n"
             except Exception as e:
                 logger.warning(f"Error extracting old overview: {e}")
-        
+
         # Add AI-generated content
         if ai_summary:
             # Extract the content between markers
             ai_content = ai_summary.split("(BEGIN AI Generated)")[1].split("(END AI Generated)")[0].strip()
-            
+
             # Start AI section
             readme += "(BEGIN AI Generated)\n"
-            
+
             # Add AI summary
             readme += ai_content + "\n\n"
-            
+
             # Add classes section within AI markers
             class_section = self.generate_class_section(info.get('classes', []))
             if class_section:
                 readme += class_section
-            
+
             # End AI section
             readme += "(END AI Generated)\n"
         else:
@@ -222,20 +222,20 @@ class ReadmeGenerator:
             class_section = self.generate_class_section(info.get('classes', []))
             if class_section:
                 readme += class_section
-        
+
         return readme
 
     def generate_class_section(self, classes: List[Dict]) -> str:
         """Generate documentation for classes."""
         if not classes:
             return ""
-            
+
         section = "\n## Classes\n\n"
         for cls in classes:
             section += f"### `{cls['name']}`\n\n"
             if cls['docstring']:
                 section += f"{cls['docstring'].strip()}\n\n"
-            
+
             if cls['methods']:
                 section += "#### Methods\n\n"
                 for method in cls['methods']:
@@ -252,17 +252,17 @@ class ReadmeGenerator:
         try:
             readme_content = await self.generate_readme(file_path, content)
             readme_path = f"{file_path}_README.md"
-            
+
             # Verify we're not writing an empty or minimal readme
             if len(readme_content.strip().split('\n')) <= 3:  # Just title and overview header
                 logger.warning("Generated README seems too minimal, skipping update")
                 return
-                
+
             with open(readme_path, 'w') as f:
                 f.write(readme_content)
-                
+
             logger.info(f"Updated README at {readme_path}")
-            
+
         except Exception as e:
             logger.error(f"Error updating README: {e}")
             logger.exception("Full traceback:")
@@ -283,18 +283,18 @@ class PyFileHandler(FileSystemEventHandler):
             for file in files:
                 if not file.endswith('.py') and not file.endswith('.lua'):
                     continue
-                    
+
                 file_path = os.path.join(root, file)
                 readme_path = f"{file_path}_README.md"
-                
+
                 if os.path.exists(readme_path):
                     continue
-                    
+
                 logger.info(f"Processing existing file: {file_path}")
                 try:
                     with open(file_path, 'r') as f:
                         content = f.read()
-                    
+
                     # Add to queue for processing
                     asyncio.create_task(self.queue.put((file_path, content)))
                 except Exception as e:
@@ -304,20 +304,20 @@ class PyFileHandler(FileSystemEventHandler):
         """Handle file modification events."""
         if event.is_directory:
             return
-            
+
         file_path = event.src_path
         if not file_path.endswith('.py') and not file_path.endswith('.lua'):
             return
-            
+
         logger.info(f"Detected modification to {file_path}")
-        
+
         try:
             with open(file_path, 'r') as f:
                 content = f.read()
-            
+
             # Add to queue for processing
             asyncio.create_task(self.queue.put((file_path, content)))
-            
+
         except Exception as e:
             logger.error(f"Error processing file {file_path}: {e}")
 
@@ -357,13 +357,13 @@ async def main(path: str) -> None:
         # Process existing files before starting the watcher
         logger.info("Processing existing files...")
         event_handler.process_existing_files(path)
-        
+
         observer = Observer()
         observer.schedule(event_handler, path, recursive=True)
         observer.start()
-        
+
         logger.info(f"Started monitoring directory: {path}")
-        
+
         try:
             while True:
                 await asyncio.sleep(1)
@@ -372,7 +372,7 @@ async def main(path: str) -> None:
             observer.stop()
             event_handler.stop()
         observer.join()
-        
+
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
@@ -381,6 +381,6 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         logger.error("Please provide the directory path to monitor")
         sys.exit(1)
-    
+
     path = sys.argv[1]
     asyncio.run(main(path))
