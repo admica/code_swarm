@@ -17,13 +17,14 @@ import configparser
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Any, Union
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, BackgroundTasks, APIRouter
+from fastapi import FastAPI, HTTPException, BackgroundTasks, APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from shared.llm import LLMService
 from shared.config import config_manager
 from shared.models import AgentStatus, LLMRequest, LLMResponse, LLMStatus, ControllerInfo
+import aiofiles
 
 # Set up logging
 logger = logging.getLogger('swarm_controller')
@@ -924,6 +925,127 @@ async def set_ai_markers(begin: str, end: str):
 
 # Include the API router
 app.include_router(api_router)
+
+# Add WebSocket endpoint for log streaming
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """Stream logs from all agents and controller via WebSocket."""
+    try:
+        await websocket.accept()
+        logger.info("New client connected to log stream")
+        
+        async def tail_log(file_path: Path):
+            """Tail a log file and send updates via WebSocket.
+            
+            Handles cases where:
+            - File doesn't exist yet (waits for creation)
+            - File is deleted while tailing
+            - File is rotated
+            """
+            while True:
+                try:
+                    # Wait for file to exist
+                    while not file_path.exists():
+                        await asyncio.sleep(1)
+                        continue
+
+                    async with aiofiles.open(file_path, 'r') as f:
+                        # Seek to end initially
+                        await f.seek(0, 2)
+                        
+                        while True:
+                            line = await f.readline()
+                            if not line:
+                                # Check if file still exists (handle deletion)
+                                if not file_path.exists():
+                                    break
+                                await asyncio.sleep(0.1)
+                                continue
+                                
+                            try:
+                                await websocket.send_text(line.strip())
+                            except WebSocketDisconnect:
+                                logger.info(f"Client disconnected while sending log from {file_path}")
+                                return
+                            except Exception as e:
+                                logger.error(f"Error sending log from {file_path}: {e}")
+                                # Continue trying to send other logs
+                                continue
+                                
+                except FileNotFoundError:
+                    # File was deleted, wait for recreation
+                    logger.warning(f"Log file deleted: {file_path}, waiting for recreation")
+                    continue
+                except PermissionError:
+                    logger.error(f"Permission denied reading log file: {file_path}")
+                    return
+                except Exception as e:
+                    logger.error(f"Error tailing log {file_path}: {e}")
+                    await asyncio.sleep(1)  # Prevent tight loop on persistent errors
+                    continue
+
+        try:
+            # Start tasks for each log file
+            log_dir = Path('logs')
+            log_dir.mkdir(exist_ok=True)
+            tasks = []
+            
+            # Send initial connection message
+            await websocket.send_text(
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - system - INFO - Connected to log stream"
+            )
+            
+            # Controller log
+            controller_log = log_dir / 'swarm_controller.log'
+            tasks.append(asyncio.create_task(
+                tail_log(controller_log),
+                name=f"tail_{controller_log.name}"
+            ))
+            
+            # Agent logs
+            for agent_name in controller.agents:
+                agent_log = log_dir / f'agent_{agent_name}.log'
+                tasks.append(asyncio.create_task(
+                    tail_log(agent_log),
+                    name=f"tail_{agent_log.name}"
+                ))
+            
+            logger.info(f"Started {len(tasks)} log tailing tasks")
+            
+            try:
+                # Wait for all tasks or client disconnect
+                await asyncio.gather(*tasks)
+            except asyncio.CancelledError:
+                # Handle cancellation gracefully
+                logger.info("Log streaming tasks cancelled")
+            finally:
+                # Ensure all tasks are properly cleaned up
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+            
+        except Exception as e:
+            error_msg = f"Error setting up log streaming: {e}"
+            logger.error(error_msg)
+            await websocket.send_text(
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - system - ERROR - {error_msg}"
+            )
+            raise
+            
+    except WebSocketDisconnect:
+        logger.info("Client disconnected from log stream")
+    except Exception as e:
+        logger.error(f"Unexpected error in websocket handler: {e}")
+    finally:
+        # Ensure we're properly closed
+        try:
+            await websocket.close()
+        except:
+            pass
 
 def main():
     """Main entry point for the swarm controller."""

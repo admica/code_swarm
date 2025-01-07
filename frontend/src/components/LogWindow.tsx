@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { agentsApi } from '../lib/api';
 import { ChangelogEntry, ReadmeUpdate, DependencyGraph, AgentState } from '../types/agents';
 
@@ -20,39 +20,154 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
   const [logs, setLogs] = useState<ActivityMessage[]>([]);
   const [autoScroll, setAutoScroll] = useState(true);
   const [selectedAgent, setSelectedAgent] = useState<string | 'all'>('all');
+  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected');
+  const [connectionAttempts, setConnectionAttempts] = useState(0);
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
 
-  useEffect(() => {
-    const pollInterval = setInterval(async () => {
-      try {
-        // Poll agent logs
-        for (const agent of agents) {
-          const agentLogs = await agentsApi.getAgentLogs(agent);
-          agentLogs.forEach(log => {
-            const parsedLog = parseBackendLog(log);
-            if (parsedLog) {
-              setLogs(prev => [...prev, parsedLog]);
+  const MAX_LOGS = 1000; // Maximum number of logs to keep in memory
+  const MAX_RETRY_ATTEMPTS = 5;
+  const RETRY_DELAY = 5000; // 5 seconds
+
+  // Add log with rate limiting
+  const addLog = useCallback((newLog: ActivityMessage) => {
+    setLogs(prev => {
+      const updated = [...prev, newLog];
+      // Keep only the last MAX_LOGS entries
+      return updated.slice(-MAX_LOGS);
+    });
+  }, [MAX_LOGS]);
+
+  const connectWebSocket = useCallback(() => {
+    try {
+      // Clear any existing connection
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+
+      setWsStatus('connecting');
+      const ws = new WebSocket('ws://localhost:8000/ws/logs');
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setWsStatus('connected');
+        setConnectionAttempts(0); // Reset attempts on successful connection
+        addLog({
+          timestamp: new Date().toISOString(),
+          type: 'status',
+          agent: 'system',
+          content: 'Connected to log stream',
+          level: 'info'
+        });
+      };
+
+      ws.onmessage = (event) => {
+        const log = parseBackendLog(event.data);
+        if (log) {
+          addLog(log);
+          
+          if (autoScroll && logContainerRef.current) {
+            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+          }
+        }
+      };
+
+      ws.onclose = (event) => {
+        setWsStatus('disconnected');
+        addLog({
+          timestamp: new Date().toISOString(),
+          type: 'status',
+          agent: 'system',
+          content: `Disconnected from log stream (code: ${event.code})${event.reason ? ': ' + event.reason : ''}`,
+          level: 'warning'
+        });
+
+        // Attempt to reconnect if not at max attempts
+        const shouldRetry = connectionAttempts < MAX_RETRY_ATTEMPTS;
+        if (shouldRetry) {
+          setConnectionAttempts(prev => prev + 1);
+          addLog({
+            timestamp: new Date().toISOString(),
+            type: 'status',
+            agent: 'system',
+            content: `Reconnecting... (attempt ${connectionAttempts + 1}/${MAX_RETRY_ATTEMPTS})`,
+            level: 'info'
+          });
+
+          // Clear any existing timeout
+          if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+          }
+
+          // Set new reconnection timeout
+          reconnectTimeoutRef.current = setTimeout(() => {
+            if (wsRef.current === ws) { // Only reconnect if this is still the current ws
+              connectWebSocket();
             }
+          }, RETRY_DELAY);
+        } else {
+          setWsStatus('error');
+          addLog({
+            timestamp: new Date().toISOString(),
+            type: 'status',
+            agent: 'system',
+            content: 'Maximum reconnection attempts reached. Please refresh the page.',
+            level: 'error'
           });
         }
-      } catch (error) {
-        console.error('Error polling logs:', error);
-      }
-    }, 5000);
+      };
 
-    return () => clearInterval(pollInterval);
-  }, [agents]);
-
-  useEffect(() => {
-    if (autoScroll && logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        addLog({
+          timestamp: new Date().toISOString(),
+          type: 'status',
+          agent: 'system',
+          content: 'WebSocket error occurred',
+          level: 'error'
+        });
+      };
+    } catch (error) {
+      console.error('Error connecting to WebSocket:', error);
+      setWsStatus('error');
+      addLog({
+        timestamp: new Date().toISOString(),
+        type: 'status',
+        agent: 'system',
+        content: `Failed to connect: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        level: 'error'
+      });
     }
-  }, [logs, autoScroll]);
+  }, [connectionAttempts, autoScroll, addLog]);
+
+  // Initial connection
+  useEffect(() => {
+    connectWebSocket();
+
+    // Cleanup on unmount
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [connectWebSocket]);
+
+  // Manual reconnect handler
+  const handleReconnect = useCallback(() => {
+    setConnectionAttempts(0); // Reset attempts
+    connectWebSocket();
+  }, [connectWebSocket]);
 
   // Convert backend log message to ActivityMessage
   const parseBackendLog = (log: string): ActivityMessage | null => {
     try {
-      const timestamp = log.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)?.[0] || '';
+      const timestamp = log.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)?.[0] || new Date().toISOString();
       const isError = log.includes(' ERROR ');
       const isWarning = log.includes(' WARNING ');
       
@@ -68,22 +183,8 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
         };
       }
       
-      // Parse HTTP request logs
-      if (log.includes('HTTP/1.1')) {
-        const [method, path, status] = log.match(/(?:"(GET|POST) ([^"]+) HTTP\/1\.1") (\d{3})/i)?.slice(1) || [];
-        const isError = status && parseInt(status) >= 400;
-        return {
-          timestamp,
-          type: 'api',
-          agent: 'controller',
-          content: `${method} ${path}`,
-          level: isError ? 'error' : 'info',
-          details: status
-        };
-      }
-      
       // Parse agent logs
-      const agentMatch = log.match(/agent_code_mon_(\w+)\.py/);
+      const agentMatch = log.match(/agent_code_mon_(\w+)/);
       const agent = agentMatch ? agentMatch[1] : '';
       const message = log.replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - /, '');
       
@@ -113,6 +214,22 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold text-white">Agent Logs</h2>
+          <div className={`px-2 py-1 rounded text-xs font-medium ${
+            wsStatus === 'connected' ? 'bg-green-900/50 text-green-300' :
+            wsStatus === 'connecting' ? 'bg-yellow-900/50 text-yellow-300' :
+            wsStatus === 'error' ? 'bg-red-900/50 text-red-300' :
+            'bg-slate-700 text-slate-300'
+          }`}>
+            {wsStatus}
+          </div>
+          {wsStatus === 'error' && (
+            <button
+              onClick={handleReconnect}
+              className="px-2 py-1 rounded text-xs font-medium bg-blue-900/50 text-blue-300 hover:bg-blue-900"
+            >
+              Retry Connection
+            </button>
+          )}
           <select
             value={selectedAgent}
             onChange={(e) => setSelectedAgent(e.target.value)}
@@ -132,7 +249,7 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
         </div>
         <div className="flex items-center gap-4">
           <span className="text-xs text-slate-400">
-            {filteredLogs.length} logs
+            {filteredLogs.length} logs {logs.length === MAX_LOGS && '(max reached)'}
           </span>
           <label className="flex items-center gap-2">
             <input
