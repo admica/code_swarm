@@ -930,18 +930,13 @@ app.include_router(api_router)
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
     """Stream logs from all agents and controller via WebSocket."""
+    tasks = []
     try:
         await websocket.accept()
         logger.info("New client connected to log stream")
 
         async def tail_log(file_path: Path):
-            """Tail a log file and send updates via WebSocket.
-
-            Handles cases where:
-            - File doesn't exist yet (waits for creation)
-            - File is deleted while tailing
-            - File is rotated
-            """
+            """Tail a log file and send updates via WebSocket."""
             while True:
                 try:
                     # Wait for file to exist
@@ -969,8 +964,7 @@ async def websocket_logs(websocket: WebSocket):
                                 return
                             except Exception as e:
                                 logger.error(f"Error sending log from {file_path}: {e}")
-                                # Continue trying to send other logs
-                                continue
+                                return  # Stop this task on error
 
                 except FileNotFoundError:
                     # File was deleted, wait for recreation
@@ -988,7 +982,6 @@ async def websocket_logs(websocket: WebSocket):
             # Start tasks for each log file
             log_dir = Path('logs')
             log_dir.mkdir(exist_ok=True)
-            tasks = []
 
             # Send initial connection message
             await websocket.send_text(
@@ -1012,21 +1005,19 @@ async def websocket_logs(websocket: WebSocket):
 
             logger.info(f"Started {len(tasks)} log tailing tasks")
 
-            try:
-                # Wait for all tasks or client disconnect
-                await asyncio.gather(*tasks)
-            except asyncio.CancelledError:
-                # Handle cancellation gracefully
-                logger.info("Log streaming tasks cancelled")
-            finally:
-                # Ensure all tasks are properly cleaned up
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
+            # Wait for all tasks to complete or connection to close
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_EXCEPTION  # Only stop on actual errors
+            )
+
+            # Check if any task failed
+            for task in done:
+                try:
+                    await task
+                except Exception as e:
+                    logger.error(f"Task failed: {e}")
+                    raise  # Re-raise to trigger cleanup
 
         except Exception as e:
             error_msg = f"Error setting up log streaming: {e}"
@@ -1041,11 +1032,24 @@ async def websocket_logs(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Unexpected error in websocket handler: {e}")
     finally:
-        # Ensure we're properly closed
+        # Clean up all tasks
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await asyncio.shield(task)  # Ensure task cleanup completes
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.error(f"Error cancelling task: {e}")
+        
+        # Ensure websocket is closed
         try:
             await websocket.close()
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error closing websocket: {e}")
+        
+        logger.info("Cleaned up all tasks and closed websocket")
 
 def main():
     """Main entry point for the swarm controller."""

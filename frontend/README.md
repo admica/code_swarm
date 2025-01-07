@@ -51,7 +51,7 @@ src/
 ### Configuration
 The application expects the following services to be available:
 - REST API: `http://localhost:8000/api`
-- WebSocket: `ws://localhost:8000/ws`
+- WebSocket: `ws://localhost:8000/ws/logs`
 - Ollama: `http://localhost:11434` (for AI features)
 
 ### Running the Application
@@ -94,7 +94,9 @@ The application expects the following services to be available:
 1. WebSocket Connection Failures
    - Ensure the backend server is running
    - Check if port 8000 is available
-   - The frontend will automatically attempt to reconnect
+   - The frontend will automatically attempt to reconnect with exponential backoff
+   - Check browser console for detailed connection errors
+   - Verify the WebSocket endpoint is correct (`ws://localhost:8000/ws/logs`)
 
 2. Agent Start/Stop Issues
    - Verify the monitor path exists and has correct permissions

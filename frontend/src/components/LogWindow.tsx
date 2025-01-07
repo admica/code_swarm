@@ -29,7 +29,9 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
 
   const MAX_LOGS = 1000; // Maximum number of logs to keep in memory
   const MAX_RETRY_ATTEMPTS = 5;
-  const RETRY_DELAY = 5000; // 5 seconds
+  const RETRY_DELAY = 2000; // 2 seconds initial delay
+  const MAX_RETRY_DELAY = 30000; // 30 seconds max delay
+  const RETRY_BACKOFF = 1.5; // Exponential backoff multiplier
 
   // Add log with rate limiting
   const addLog = useCallback((newLog: ActivityMessage) => {
@@ -47,13 +49,18 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
 
   const connectWebSocket = useCallback(() => {
     try {
-      // Clear any existing connection
+      // Clear any existing connection and timeout
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = undefined;
+      }
 
       setWsStatus('connecting');
+
       const ws = new WebSocket('ws://localhost:8000/ws/logs');
       wsRef.current = ws;
 
@@ -78,45 +85,50 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
 
       ws.onclose = (event) => {
         setWsStatus('disconnected');
+        
+        // Don't increment attempts if it was a normal closure
+        const wasNormalClosure = event.code === 1000 || event.code === 1001;
+        
         addLog({
           timestamp: new Date().toISOString(),
           type: 'status',
           agent: 'system',
           content: `Disconnected from log stream (code: ${event.code})${event.reason ? ': ' + event.reason : ''}`,
-          level: 'warning'
+          level: wasNormalClosure ? 'info' : 'warning'
         });
 
-        // Attempt to reconnect if not at max attempts
-        const shouldRetry = connectionAttempts < MAX_RETRY_ATTEMPTS;
-        if (shouldRetry) {
-          setConnectionAttempts(prev => prev + 1);
+        // Clear existing connection
+        wsRef.current = null;
+
+        // Attempt to reconnect if not at max attempts and not a normal closure
+        if (!wasNormalClosure && connectionAttempts < MAX_RETRY_ATTEMPTS) {
+          const nextAttempt = connectionAttempts + 1;
+          const currentDelay = Math.min(
+            RETRY_DELAY * Math.pow(RETRY_BACKOFF, connectionAttempts),
+            MAX_RETRY_DELAY
+          );
+
           addLog({
             timestamp: new Date().toISOString(),
             type: 'status',
             agent: 'system',
-            content: `Reconnecting... (attempt ${connectionAttempts + 1}/${MAX_RETRY_ATTEMPTS})`,
+            content: `Reconnecting in ${Math.round(currentDelay/1000)}s (attempt ${nextAttempt}/${MAX_RETRY_ATTEMPTS})`,
             level: 'info'
           });
 
-          // Clear any existing timeout
-          if (reconnectTimeoutRef.current) {
-            clearTimeout(reconnectTimeoutRef.current);
-          }
-
-          // Set new reconnection timeout
+          // Schedule reconnection
           reconnectTimeoutRef.current = setTimeout(() => {
-            if (wsRef.current === ws) { // Only reconnect if this is still the current ws
-              connectWebSocket();
-            }
-          }, RETRY_DELAY);
+            setConnectionAttempts(nextAttempt);
+            connectWebSocket();
+          }, currentDelay);
         } else {
           setWsStatus('error');
           addLog({
             timestamp: new Date().toISOString(),
             type: 'status',
             agent: 'system',
-            content: 'Maximum reconnection attempts reached. Please refresh the page.',
-            level: 'error'
+            content: wasNormalClosure ? 'Connection closed normally' : 'Maximum reconnection attempts reached. Please refresh the page.',
+            level: wasNormalClosure ? 'info' : 'error'
           });
         }
       };
@@ -142,7 +154,7 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
         level: 'error'
       });
     }
-  }, [connectionAttempts, autoScroll, addLog]);
+  }, [connectionAttempts, addLog]);
 
   // Initial connection
   useEffect(() => {
