@@ -4,88 +4,34 @@
 Agent that analyzes Python file dependencies and generates Mermaid diagrams.
 """
 import sys
-import time
 import os
 import logging
 import ast
-import configparser
+import asyncio
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
 import importlib.util
 import re
-import requests
+from shared import LLMClient, config_manager, AgentLogger
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('agent_code_mon_deps.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger('agent_code_mon_deps')
-
-class ConfigManager:
-    """Manages configuration for the dependency graph agent."""
-
-    def __init__(self, config_path: str = 'config.ini'):
-        self.config = configparser.ConfigParser()
-        self.config_path = config_path
-        self.load_config()
-
-    def load_config(self) -> None:
-        """Load configuration from config.ini file."""
-        if not os.path.exists(self.config_path):
-            logger.warning(f"Config file not found at {self.config_path}. Creating default configuration.")
-            self.create_default_config()
-
-        try:
-            self.config.read(self.config_path)
-        except configparser.Error as e:
-            logger.error(f"Error reading config file: {e}")
-            raise
-
-    def create_default_config(self) -> None:
-        """Create default configuration file."""
-        self.config['agent_code_mon_deps'] = {
-            'watch_patterns': '*.py',
-            'ignore_patterns': '__pycache__/*,.*,test_*',
-            'max_depth': '5',  # Maximum directory depth to search
-            'group_by_directory': 'true',
-            'include_external_deps': 'false',
-            'diagram_direction': 'TD',  # TB (top-bottom), LR (left-right), etc.
-            'ollama_model': 'llama3.2',
-            'controller_url': 'http://localhost:8000',
-            'enable_ai_analysis': 'true'
-        }
-
-        with open(self.config_path, 'w') as f:
-            self.config.write(f)
-
-    def get_config(self) -> Dict[str, str]:
-        """Get configuration dictionary."""
-        if 'agent_code_mon_deps' not in self.config:
-            logger.warning("Configuration section missing, creating default")
-            self.create_default_config()
-        return self.config['agent_code_mon_deps']
+logger = AgentLogger('code_mon_deps')
 
 class DependencyAnalyzer:
-    """Analyzes Python code dependencies."""
+    """Analyzes Python file dependencies."""
 
-    def __init__(self, root_path: str, config: Dict[str, str]):
+    def __init__(self, root_path: str):
         """Initialize the analyzer with root path and configuration."""
         self.root_path = os.path.abspath(root_path)
-        self.config = config
-        self.max_depth = int(config.get('max_depth', '5'))
-        self.group_by_directory = config.get('group_by_directory', 'true').lower() == 'true'
-        self.include_external_deps = config.get('include_external_deps', 'false').lower() == 'true'
-        self.diagram_direction = config.get('diagram_direction', 'TD')
-        self.enable_ai_analysis = config.get('enable_ai_analysis', 'true').lower() == 'true'
-        self.controller_url = config.get('controller_url', 'http://localhost:8000')
-        self.ollama_model = config.get('ollama_model', 'llama3.2')
+        self.config = config_manager.get_agent_config('code_mon_deps')
+        self.max_depth = int(self.config.get('max_depth', '5'))
+        self.group_by_directory = self.config.get('group_by_directory', 'true').lower() == 'true'
+        self.include_external_deps = self.config.get('include_external_deps', 'false').lower() == 'true'
+        self.diagram_direction = self.config.get('diagram_direction', 'TD')
+        self.enable_ai_analysis = self.config.get('enable_ai_analysis', 'true').lower() == 'true'
+        self.llm_client = LLMClient('code_mon_deps')
 
         # Cache for analyzed files
         self.file_cache: Dict[str, Dict] = {}
@@ -389,7 +335,7 @@ class DependencyAnalyzer:
 
         return mermaid
 
-    def get_ai_insights(self, dependencies: Dict[str, List[str]]) -> Optional[str]:
+    async def get_ai_insights(self, dependencies: Dict[str, List[str]]) -> Optional[str]:
         """Get AI insights about the dependency structure using LLM.
         
         Args:
@@ -451,59 +397,13 @@ Please provide:
 3. Specific recommendations for improvement
 Keep the response under 200 words."""
 
-            max_retries = 3
-            retry_delay = 1.0  # seconds
-            last_error = None
-
-            for attempt in range(max_retries):
-                try:
-                    if attempt > 0:
-                        logger.info(f"Retrying LLM request (attempt {attempt + 1}/{max_retries})")
-                        time.sleep(retry_delay * attempt)  # Exponential backoff
-
-                    response = requests.post(
-                        f"{self.controller_url}/api/llm/generate",
-                        json={
-                            "prompt": prompt,
-                            "model": self.ollama_model,
-                            "agent": "deps",
-                            "max_tokens": 1000,
-                            "temperature": 0.7
-                        },
-                        timeout=30
-                    )
-                    
-                    if response.status_code == 200:
-                        result = response.json()
-                        if result.get('response'):
-                            return result['response']
-                            
-                        if result.get('error'):
-                            last_error = f"LLM error: {result['error']}"
-                            logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
-                            if attempt == max_retries - 1:
-                                logger.error(last_error)
-                                return None
-
-                    elif response.status_code == 404:
-                        logger.error("LLM endpoint not found")
-                        return None
-                    else:
-                        last_error = f"LLM request failed with status {response.status_code}: {response.text}"
-                        logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
-                        if attempt == max_retries - 1:
-                            logger.error(last_error)
-                            return None
-
-                except requests.exceptions.RequestException as e:
-                    last_error = f"Request error: {str(e)}"
-                    logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
-                    if attempt == max_retries - 1:
-                        logger.error(last_error)
-                        return None
-
-            logger.error(f"All {max_retries} attempts failed. Last error: {last_error}")
-            return None
+            result = await self.llm_client.generate(
+                prompt=prompt,
+                max_tokens=1000,
+                temperature=0.7
+            )
+            
+            return result.get('response') if result else None
 
         except Exception as e:
             logger.error(f"Unexpected error in AI analysis: {e}")
@@ -515,7 +415,7 @@ class DependencyVisualizer:
     def __init__(self, analyzer: DependencyAnalyzer):
         self.analyzer = analyzer
 
-    def update_visualization(self) -> None:
+    async def update_visualization(self) -> None:
         """Update dependency visualization files."""
         try:
             # Analyze project dependencies
@@ -525,7 +425,7 @@ class DependencyVisualizer:
             mermaid = self.analyzer.generate_mermaid(dependencies)
 
             # Get AI insights
-            ai_insights = self.analyzer.get_ai_insights(dependencies)
+            ai_insights = await self.analyzer.get_ai_insights(dependencies)
 
             # Create visualization file
             vis_path = os.path.join(self.analyzer.root_path, 'dependency_graph.md')
@@ -564,8 +464,11 @@ class DependencyVisualizer:
 class PyFileHandler(FileSystemEventHandler):
     """Handles Python file modification events."""
 
-    def __init__(self, visualizer: DependencyVisualizer):
-        self.visualizer = visualizer
+    def __init__(self, path: str):
+        self.analyzer = DependencyAnalyzer(path)
+        self.visualizer = DependencyVisualizer(self.analyzer)
+        self.queue = asyncio.Queue()
+        self._task: Optional[asyncio.Task] = None
         logger.info("File handler initialized")
 
     def on_modified(self, event) -> None:
@@ -577,20 +480,44 @@ class PyFileHandler(FileSystemEventHandler):
             return
 
         logger.info(f"Detected modification to {event.src_path}")
-        self.visualizer.update_visualization()
+        # Add to queue for processing
+        asyncio.create_task(self.queue.put(event.src_path))
 
-def main(path: str) -> None:
+    async def start_processing(self):
+        """Start processing the file queue."""
+        while True:
+            try:
+                file_path = await self.queue.get()
+                try:
+                    await self.visualizer.update_visualization()
+                except Exception as e:
+                    logger.error(f"Error updating visualization for {file_path}: {e}")
+                finally:
+                    self.queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in queue processor: {e}")
+                await asyncio.sleep(1)
+
+    def start(self):
+        """Start the queue processor."""
+        if not self._task or self._task.done():
+            self._task = asyncio.create_task(self.start_processing())
+
+    def stop(self):
+        """Stop the queue processor."""
+        if self._task:
+            self._task.cancel()
+
+async def main(path: str) -> None:
     """Main function to run the dependency graph agent."""
     try:
-        config_manager = ConfigManager()
-        config = config_manager.get_config()
-
-        analyzer = DependencyAnalyzer(path, config)
-        visualizer = DependencyVisualizer(analyzer)
-        event_handler = PyFileHandler(visualizer)
+        event_handler = PyFileHandler(path)
+        event_handler.start()
 
         # Generate initial visualization
-        visualizer.update_visualization()
+        await event_handler.visualizer.update_visualization()
 
         observer = Observer()
         observer.schedule(event_handler, path, recursive=True)
@@ -600,10 +527,11 @@ def main(path: str) -> None:
 
         try:
             while True:
-                time.sleep(1)
+                await asyncio.sleep(1)
         except KeyboardInterrupt:
             logger.info("Received shutdown signal")
             observer.stop()
+            event_handler.stop()
         observer.join()
 
     except Exception as e:
@@ -616,4 +544,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     path = sys.argv[1]
-    main(path)
+    asyncio.run(main(path))

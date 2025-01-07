@@ -1,78 +1,29 @@
 #!/usr/bin/env python3
 # PATH: ./agent_code_mon_readme.py
 """
-Agent that automatically generates and maintains README files for Python modules.
+Agent that automatically generates and maintains README files for Python and Lua modules.
 """
 import sys
 import time
 import os
 import logging
 import ast
-import configparser
+import asyncio
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from pathlib import Path
-import requests
 from typing import Optional, Dict, List, Tuple
+from shared import LLMClient, config_manager, AgentLogger
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('agent_code_mon_readme.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger('agent_code_mon_readme')
+logger = AgentLogger('code_mon_readme')
 
-class ConfigManager:
-    """Manages configuration for the README generator agent."""
-    
-    def __init__(self, config_path: str = 'config.ini'):
-        self.config = configparser.ConfigParser()
-        self.config_path = config_path
-        self.load_config()
+class CodeAnalyzer:
+    """Analyzes code to extract documentation and structure."""
 
-    def load_config(self) -> None:
-        """Load configuration from config.ini file."""
-        if not os.path.exists(self.config_path):
-            logger.warning(f"Config file not found at {self.config_path}. Creating default configuration.")
-            self.create_default_config()
-        
-        try:
-            self.config.read(self.config_path)
-        except configparser.Error as e:
-            logger.error(f"Error reading config file: {e}")
-            raise
-
-    def create_default_config(self) -> None:
-        """Create default configuration file."""
-        self.config['agent_code_mon_readme'] = {
-            'ollama_model': 'llama3.2',
-            'controller_url': 'http://localhost:8000',
-            'watch_patterns': '*.py',
-            'ignore_patterns': '__pycache__/*,.*,test_*',
-            'readme_sections': 'overview,functions,classes,dependencies,usage',
-            'ai_marker_begin': '(BEGIN AI Generated)',
-            'ai_marker_end': '(END AI Generated)',
-        }
-        
-        with open(self.config_path, 'w') as f:
-            self.config.write(f)
-
-    def get_config(self) -> Dict[str, str]:
-        """Get configuration dictionary."""
-        return self.config['agent_code_mon_readme']
-
-class PythonCodeAnalyzer:
-    """Analyzes Python code to extract documentation and structure."""
-
-    def __init__(self, config: Dict[str, str]):
-        """Initialize the analyzer with configuration."""
-        self.config = config
-        self.controller_url = config.get('controller_url', 'http://localhost:8000')
-        self.ollama_model = config.get('ollama_model', 'llama3.2')
+    def __init__(self):
+        """Initialize the analyzer with LLM client."""
+        self.llm_client = LLMClient('code_mon_readme')
 
     def extract_docstring(self, node: ast.AST) -> str:
         """Extract docstring from an AST node."""
@@ -82,7 +33,7 @@ class PythonCodeAnalyzer:
         return ast.get_docstring(node) or ""
 
     def analyze_code(self, content: str) -> Dict[str, any]:
-        """Analyze Python code and extract key information."""
+        """Analyze code and extract key information."""
         try:
             tree = ast.parse(content)
             
@@ -133,18 +84,17 @@ class PythonCodeAnalyzer:
             return module_info
             
         except SyntaxError as e:
-            logger.error(f"Syntax error in Python code: {e}")
+            logger.error(f"Syntax error in code: {e}")
             return {}
         except Exception as e:
-            logger.error(f"Error analyzing Python code: {e}")
+            logger.error(f"Error analyzing code: {e}")
             return {}
 
-    def get_ai_analysis(self, code_info: Dict[str, any], old_content: Optional[str] = None) -> Optional[str]:
+    async def get_ai_analysis(self, code_info: Dict[str, any], old_content: Optional[str] = None) -> Optional[str]:
         """Get AI analysis of the code using LLM.
         
         Args:
             code_info: Analyzed code information (from analyze_code)
-            old_content: Previous content of the README, if any
         """
         try:
             # Extract just the essential information for the overview
@@ -160,7 +110,7 @@ class PythonCodeAnalyzer:
             }
             
             # Build a concise prompt
-            prompt = f"""Analyze this Python module and generate a README overview:
+            prompt = f"""Analyze this module and generate a README overview:
 
 Module Purpose:
 {overview['docstring'] or 'No module docstring available.'}
@@ -175,113 +125,39 @@ Please provide:
 1. A clear, concise overview of the module's purpose
 2. Key features and functionality
 3. Any notable implementation details
-Keep the response focused and under 200 words.
+Keep the response focused and under 250 words."""
 
-Important: Do NOT include any AI markers in your response. The markers will be added automatically."""
-
-            max_retries = 3
-            retry_delay = 1.0  # seconds
-            last_error = None
-
-            for attempt in range(max_retries):
-                try:
-                    if attempt > 0:
-                        logger.info(f"Retrying LLM request (attempt {attempt + 1}/{max_retries})")
-                        time.sleep(retry_delay * attempt)  # Exponential backoff
-
-                    response = requests.post(
-                        f"{self.controller_url}/api/llm/generate",
-                        json={
-                            "prompt": prompt,
-                            "model": self.ollama_model,
-                            "agent": "readme",
-                            "max_tokens": 1000,
-                            "temperature": 0.7
-                        },
-                        timeout=60
-                    )
-                    
-                    if response.status_code == 200:
-                        result = response.json()
-                        if result.get('response'):
-                            # Get the response without any markers that might have been included
-                            ai_response = result['response'].strip()
-                            ai_response = ai_response.replace('(BEGIN AI Generated)', '')
-                            ai_response = ai_response.replace('BEGIN AI Generated', '')
-                            ai_response = ai_response.replace('(END AI Generated)', '')
-                            ai_response = ai_response.replace('END AI Generated', '')
-                            ai_response = ai_response.strip()
-                            
-                            # Add the markers properly
-                            return f"(BEGIN AI Generated)\n{ai_response}\n(END AI Generated)"
-                            
-                        if result.get('error'):
-                            last_error = f"LLM error: {result['error']}"
-                            logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
-                            if attempt == max_retries - 1:
-                                logger.error(last_error)
-                                return None
-
-                    elif response.status_code == 404:
-                        logger.error("LLM endpoint not found")
-                        return None
-                    else:
-                        last_error = f"LLM request failed with status {response.status_code}: {response.text}"
-                        logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
-                        if attempt == max_retries - 1:
-                            logger.error(last_error)
-                            return None
-
-                except requests.exceptions.RequestException as e:
-                    last_error = f"Request error: {str(e)}"
-                    logger.warning(f"Attempt {attempt + 1} failed: {last_error}")
-                    if attempt == max_retries - 1:
-                        logger.error(last_error)
-                        return None
-
-            logger.error(f"All {max_retries} attempts failed. Last error: {last_error}")
+            result = await self.llm_client.generate(
+                prompt=prompt,
+                max_tokens=1100,
+                temperature=0.6
+            )
+            
+            if result and result.get('response'):
+                # Get the response without any markers that might have been included
+                ai_response = result['response'].strip()
+                ai_response = ai_response.replace('(BEGIN AI Generated)', '')
+                ai_response = ai_response.replace('(END AI Generated)', '')
+                ai_response = ai_response.strip()
+                
+                # Add the markers properly
+                return f"(BEGIN AI Generated)\n{ai_response}\n(END AI Generated)"
+            
             return None
 
         except Exception as e:
             logger.error(f"Unexpected error in AI analysis: {e}")
             return None
 
-    def _build_prompt(self, code_info: Dict[str, any]) -> str:
-        """Build a prompt for the LLM to generate a summary or analysis."""
-        # TODO: make this, use this
-        return ""
-
 class ReadmeGenerator:
-    """Generates README.md files for Python modules."""
+    """Generates README.md files for modules."""
 
-    def __init__(self, analyzer: PythonCodeAnalyzer):
+    def __init__(self):
         """Initialize the generator with a code analyzer."""
-        self.analyzer = analyzer
+        self.analyzer = CodeAnalyzer()
 
-    def generate_class_section(self, classes: List[Dict]) -> str:
-        """Generate documentation for classes."""
-        if not classes:
-            return ""
-            
-        section = "\n## Classes\n\n"
-        for cls in classes:
-            section += f"### `{cls['name']}`\n\n"
-            if cls['docstring']:
-                section += f"{cls['docstring'].strip()}\n\n"
-            
-            if cls['methods']:
-                section += "#### Methods\n\n"
-                for method in cls['methods']:
-                    args_str = ", ".join(method['args'])
-                    section += f"- `{method['name']}({args_str})`"
-                    if method['docstring']:
-                        section += f": {method['docstring'].split('.')[0]}."
-                    section += "\n"
-                section += "\n"
-        return section
-
-    def generate_readme(self, file_path: str, content: str) -> str:
-        """Generate a complete README.md for a Python file."""
+    async def generate_readme(self, file_path: str, content: str) -> str:
+        """Generate a complete README.md for a code file."""
         old_readme = None
         readme_path = f"{file_path}_README.md"
         
@@ -304,7 +180,7 @@ class ReadmeGenerator:
             readme += f"{docstring}\n\n"
         
         # Get AI summary and generated content
-        ai_summary = self.analyzer.get_ai_analysis(info, old_readme)
+        ai_summary = await self.analyzer.get_ai_analysis(info, old_readme)
         
         # If we have an old readme, preserve non-AI content
         if old_readme and "## Overview" in old_readme:
@@ -349,10 +225,32 @@ class ReadmeGenerator:
         
         return readme
 
-    def update_readme(self, file_path: str, content: str) -> None:
+    def generate_class_section(self, classes: List[Dict]) -> str:
+        """Generate documentation for classes."""
+        if not classes:
+            return ""
+            
+        section = "\n## Classes\n\n"
+        for cls in classes:
+            section += f"### `{cls['name']}`\n\n"
+            if cls['docstring']:
+                section += f"{cls['docstring'].strip()}\n\n"
+            
+            if cls['methods']:
+                section += "#### Methods\n\n"
+                for method in cls['methods']:
+                    args_str = ", ".join(method['args'])
+                    section += f"- `{method['name']}({args_str})`"
+                    if method['docstring']:
+                        section += f": {method['docstring'].split('.')[0]}."
+                    section += "\n"
+                section += "\n"
+        return section
+
+    async def update_readme(self, file_path: str, content: str) -> None:
         """Generate and write README.md file."""
         try:
-            readme_content = self.generate_readme(file_path, content)
+            readme_content = await self.generate_readme(file_path, content)
             readme_path = f"{file_path}_README.md"
             
             # Verify we're not writing an empty or minimal readme
@@ -370,18 +268,20 @@ class ReadmeGenerator:
             logger.exception("Full traceback:")
 
 class PyFileHandler(FileSystemEventHandler):
-    """Handles Python file modification events."""
+    """Handles file modification events."""
 
-    def __init__(self, generator: ReadmeGenerator):
+    def __init__(self):
         """Initialize with a README generator."""
-        self.generator = generator
+        self.generator = ReadmeGenerator()
+        self.queue = asyncio.Queue()
+        self._task: Optional[asyncio.Task] = None
         logger.info("File handler initialized")
 
     def process_existing_files(self, path: str) -> None:
-        """Process all existing Python files in the directory that don't have READMEs."""
+        """Process all existing code files in the directory that don't have READMEs."""
         for root, _, files in os.walk(path):
             for file in files:
-                if not file.endswith('.py'):
+                if not file.endswith('.py') and not file.endswith('.lua'):
                     continue
                     
                 file_path = os.path.join(root, file)
@@ -395,7 +295,8 @@ class PyFileHandler(FileSystemEventHandler):
                     with open(file_path, 'r') as f:
                         content = f.read()
                     
-                    self.generator.update_readme(file_path, content)
+                    # Add to queue for processing
+                    asyncio.create_task(self.queue.put((file_path, content)))
                 except Exception as e:
                     logger.error(f"Error processing existing file {file_path}: {e}")
 
@@ -405,7 +306,7 @@ class PyFileHandler(FileSystemEventHandler):
             return
             
         file_path = event.src_path
-        if not file_path.endswith('.py'):
+        if not file_path.endswith('.py') and not file_path.endswith('.lua'):
             return
             
         logger.info(f"Detected modification to {file_path}")
@@ -414,27 +315,47 @@ class PyFileHandler(FileSystemEventHandler):
             with open(file_path, 'r') as f:
                 content = f.read()
             
-            self.generator.update_readme(file_path, content)
+            # Add to queue for processing
+            asyncio.create_task(self.queue.put((file_path, content)))
             
         except Exception as e:
             logger.error(f"Error processing file {file_path}: {e}")
 
-def main(path: str) -> None:
-    """Main function to run the README generator agent.
-    
-    Args:
-        path: Directory path to monitor
-    """
+    async def start_processing(self):
+        """Start processing the file queue."""
+        while True:
+            try:
+                file_path, content = await self.queue.get()
+                try:
+                    await self.generator.update_readme(file_path, content)
+                except Exception as e:
+                    logger.error(f"Error updating README for {file_path}: {e}")
+                finally:
+                    self.queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in queue processor: {e}")
+                await asyncio.sleep(1)
+
+    def start(self):
+        """Start the queue processor."""
+        if not self._task or self._task.done():
+            self._task = asyncio.create_task(self.start_processing())
+
+    def stop(self):
+        """Stop the queue processor."""
+        if self._task:
+            self._task.cancel()
+
+async def main(path: str) -> None:
+    """Main function to run the README generator agent."""
     try:
-        config_manager = ConfigManager()
-        config = config_manager.get_config()
-        
-        analyzer = PythonCodeAnalyzer(config)
-        generator = ReadmeGenerator(analyzer)
-        event_handler = PyFileHandler(generator)
-        
+        event_handler = PyFileHandler()
+        event_handler.start()
+
         # Process existing files before starting the watcher
-        logger.info("Processing existing Python files...")
+        logger.info("Processing existing files...")
         event_handler.process_existing_files(path)
         
         observer = Observer()
@@ -445,10 +366,11 @@ def main(path: str) -> None:
         
         try:
             while True:
-                time.sleep(1)
+                await asyncio.sleep(1)
         except KeyboardInterrupt:
             logger.info("Received shutdown signal")
             observer.stop()
+            event_handler.stop()
         observer.join()
         
     except Exception as e:
@@ -461,4 +383,4 @@ if __name__ == "__main__":
         sys.exit(1)
     
     path = sys.argv[1]
-    main(path)
+    asyncio.run(main(path))

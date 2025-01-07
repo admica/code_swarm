@@ -1,26 +1,9 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { AgentState, ChangelogEntry, ReadmeUpdate, DependencyGraph, ControllerInfo } from '../types/agents';
+import { LLMStatus, LLMMetrics, LLMRequest, LLMResponse } from '../types/llm';
 
 interface ApiErrorResponse {
   detail: string;
-}
-
-interface LLMMetrics {
-  total_requests: number;
-  successful_requests: number;
-  failed_requests: number;
-  success_rate: number;
-  average_processing_time: number;
-  average_queue_time: number;
-  requests_by_agent: Record<string, number>;
-}
-
-interface LLMStatus {
-  available: boolean;
-  model: string | null;
-  error: string | null;
-  models: string[] | null;
-  response_time: number | null;
 }
 
 class ApiError extends Error {

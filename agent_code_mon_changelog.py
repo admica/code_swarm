@@ -20,17 +20,10 @@ import requests
 import difflib
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
+from shared import LLMClient, config_manager, AgentLogger
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('agent_code_mon_changelog.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger('agent_code_mon_changelog')
+logger = AgentLogger('code_mon_changelog')
 
 class ConfigManager:
     """Manages configuration loading and validation for the agent."""
@@ -94,6 +87,7 @@ class CodeAnalyzer:
         """
         self.repo_path = repo_path
         self.config = config
+        self.llm_client = LLMClient('code_mon_changelog')
 
         try:
             self.repo = git.Repo(repo_path)

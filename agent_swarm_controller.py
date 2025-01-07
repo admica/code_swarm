@@ -345,33 +345,33 @@ class SwarmController:
         
         # Initialize agents dictionary
         self.agents = {
-            'changelog': {
-                'script': 'agent_code_mon_changelog.py',
-                'process': None,
-                'status': AgentStatus(
-                    name='changelog',
+            'agent_code_mon_changelog': {
+                "script": "agent_code_mon_changelog.py",
+                "process": None,
+                "status": AgentStatus(
+                    name='agent_code_mon_changelog',
                     pid=None,
                     running=False,
                     monitor_path=None,
                     last_error=None
                 )
             },
-            'readme': {
-                'script': 'agent_code_mon_readme.py',
-                'process': None,
-                'status': AgentStatus(
-                    name='readme',
+            'agent_code_mon_readme': {
+                "script": "agent_code_mon_readme.py",
+                "process": None,
+                "status": AgentStatus(
+                    name='agent_code_mon_readme',
                     pid=None,
                     running=False,
                     monitor_path=None,
                     last_error=None
                 )
             },
-            'deps': {
-                'script': 'agent_code_mon_deps.py',
-                'process': None,
-                'status': AgentStatus(
-                    name='deps',
+            'agent_code_mon_deps': {
+                "script": "agent_code_mon_deps.py",
+                "process": None,
+                "status": AgentStatus(
+                    name='agent_code_mon_deps',
                     pid=None,
                     running=False,
                     monitor_path=None,

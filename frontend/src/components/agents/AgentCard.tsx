@@ -9,11 +9,11 @@ interface AgentCardProps {
 export function AgentCard({ name, agent, onControl }: AgentCardProps) {
   const getTitle = () => {
     switch (name) {
-      case 'changelog':
+      case 'agent_code_mon_changelog':
         return 'Changelog Agent';
-      case 'readme':
+      case 'agent_code_mon_readme':
         return 'README Agent';
-      case 'deps':
+      case 'agent_code_mon_deps':
         return 'Dependency Agent';
       default:
         return `${name} Agent`;
@@ -22,11 +22,11 @@ export function AgentCard({ name, agent, onControl }: AgentCardProps) {
 
   const getDescription = () => {
     switch (name) {
-      case 'changelog':
+      case 'agent_code_mon_changelog':
         return 'Monitors code changes and generates changelogs';
-      case 'readme':
+      case 'agent_code_mon_readme':
         return 'Keeps README files up to date';
-      case 'deps':
+      case 'agent_code_mon_deps':
         return 'Analyzes project dependencies';
       default:
         return 'Monitors and analyzes code';
