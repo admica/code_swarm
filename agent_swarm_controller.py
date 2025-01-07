@@ -5,34 +5,52 @@ Swarm Controller - Manages code_swarm agents and provides API endpoints
 """
 import os
 import sys
-import subprocess
-import logging
 import json
-from typing import Dict, Optional, List, Set, Any
-import psutil
-from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, APIRouter
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import uvicorn
-from pathlib import Path
-import asyncio
 import time
+import logging
+import asyncio
+import psutil
+import uvicorn
 import aiohttp
-import requests  # Keep for sync health checks
-from datetime import datetime
+import subprocess
 import configparser
+from datetime import datetime
+from typing import Dict, List, Optional, Set, Any, Union
+from pathlib import Path
+from fastapi import FastAPI, HTTPException, BackgroundTasks, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from pydantic import BaseModel
+from shared.llm import LLMService
+from shared.config import config_manager
+from shared.models import AgentStatus, LLMRequest, LLMResponse, LLMStatus, ControllerInfo
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('swarm_controller.log'),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger('swarm_controller')
+logger.setLevel(logging.INFO)
+
+# Create logs directory if it doesn't exist
+log_dir = Path('logs')
+log_dir.mkdir(exist_ok=True)
+
+# File handler
+fh = logging.FileHandler(log_dir / 'swarm_controller.log')
+fh.setLevel(logging.INFO)
+
+# Console handler
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+
+# Formatter
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+fh.setFormatter(formatter)
+ch.setFormatter(formatter)
+
+# Add handlers
+logger.addHandler(fh)
+logger.addHandler(ch)
 
 class AgentStatus(BaseModel):
     name: str
@@ -420,12 +438,6 @@ class SwarmController:
             with open('config.ini', 'w') as configfile:
                 self.config.write(configfile)
             
-            # Broadcast the update
-            asyncio.create_task(manager.broadcast({
-                "type": "skip_list_update",
-                "data": skip_list
-            }))
-            
             return {"success": True, "skip_list": skip_list}
         except Exception as e:
             logger.error(f"Error updating skip list: {e}")
@@ -679,22 +691,12 @@ class SwarmController:
                             if not running:
                                 agent["status"].pid = None
                                 agent["process"] = None
-                            # Broadcast status change
-                            await manager.broadcast({
-                                "type": "agent_update",
-                                "data": agent["status"].dict()
-                            })
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         if agent["status"].running:
                             agent["status"].running = False
                             agent["status"].pid = None
                             agent["process"] = None
-                            # Broadcast status change
-                            await manager.broadcast({
-                                "type": "agent_update",
-                                "data": agent["status"].dict()
-                            })
-            await asyncio.sleep(1)  # Check every second
+            await asyncio.sleep(1)
 
     async def start_monitoring(self):
         """Start the agent monitoring task."""
@@ -744,51 +746,6 @@ api_router = APIRouter(prefix="/api")
 controller = SwarmController()
 llm_service = LLMService()
 
-# WebSocket connection manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.add(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.error(f"Error broadcasting to WebSocket: {e}")
-                # Remove failed connections
-                self.active_connections.remove(connection)
-
-manager = ConnectionManager()
-
-# Move WebSocket endpoint to root level (not under /api)
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            # Wait for messages but primarily use this for sending updates
-            data = await websocket.receive_text()
-            try:
-                message = json.loads(data)
-                if message.get('type') == 'ping':
-                    await websocket.send_json({'type': 'pong'})
-            except json.JSONDecodeError:
-                logger.error(f"Invalid WebSocket message format: {data}")
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        logger.info("WebSocket client disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        manager.disconnect(websocket)
-        logger.info("WebSocket client disconnected due to error")
-
 # Move all endpoints to API router
 @api_router.post("/config/monitor-path")
 async def set_monitor_path(path: str):
@@ -821,10 +778,6 @@ async def start_agent(agent_name: str, path: str = None):
             )
         
         status = controller.start_agent(agent_name, path)
-        await manager.broadcast({
-            "type": "agent_update",
-            "data": status.dict()
-        })
         return status
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -836,10 +789,6 @@ async def stop_agent(agent_name: str):
     """Stop a specific agent."""
     try:
         status = controller.stop_agent(agent_name)
-        await manager.broadcast({
-            "type": "agent_update",
-            "data": status.dict()
-        })
         return status
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -873,23 +822,16 @@ async def start_all_agents(path: str = None):
         raise HTTPException(status_code=400, detail="No monitor path configured")
     
     statuses = controller.start_all(actual_path)
-    for agent_name, status in statuses.items():
-        await manager.broadcast({
-            "type": "agent_update",
-            "data": status.dict()
-        })
     return statuses
 
 @api_router.post("/agents/stop-all")
 async def stop_all_agents():
     """Stop all agents."""
-    statuses = controller.stop_all()
-    for agent_name, status in statuses.items():
-        await manager.broadcast({
-            "type": "agent_update",
-            "data": status.dict()
-        })
-    return statuses
+    try:
+        statuses = controller.stop_all()
+        return statuses
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.get("/llm/status")
 async def get_llm_status():

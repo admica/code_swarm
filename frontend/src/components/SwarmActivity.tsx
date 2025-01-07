@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { useWebSocket } from '../lib/websocket';
 import { AgentState, ChangelogEntry, ReadmeUpdate, DependencyGraph } from '../types/agents';
+import { agentsApi } from '../lib/api';
 
 interface ActivityMessage {
   timestamp: string;
@@ -17,65 +17,37 @@ interface SwarmActivityProps {
 export function SwarmActivity({ className = '' }: SwarmActivityProps) {
   const [messages, setMessages] = useState<ActivityMessage[]>([]);
   const [autoScroll, setAutoScroll] = useState(true);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const handleMessage = (message: any) => {
-    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    let activityMessage: ActivityMessage | null = null;
-
-    switch (message.type) {
-      case 'agent_update':
-        const agentState = message.data as AgentState;
-        activityMessage = {
-          timestamp: now,
-          type: 'status',
-          agent: agentState.name,
-          content: `Agent ${agentState.running ? 'started' : 'stopped'}${agentState.last_error ? ` (Error: ${agentState.last_error})` : ''}`,
-          level: agentState.last_error ? 'error' : 'info'
-        };
-        break;
-      case 'changelog':
-        const changelog = message.data as ChangelogEntry;
-        activityMessage = {
-          timestamp: now,
-          type: 'changelog',
-          agent: 'changelog',
-          content: `New changes in ${changelog.file}: ${changelog.summary}`,
-          level: 'info'
-        };
-        break;
-      case 'readme':
-        const readme = message.data as ReadmeUpdate;
-        activityMessage = {
-          timestamp: now,
-          type: 'readme',
-          agent: 'readme',
-          content: `Updated README for ${readme.file}`,
-          level: 'info'
-        };
-        break;
-      case 'dependency':
-        const deps = message.data as DependencyGraph;
-        activityMessage = {
-          timestamp: now,
-          type: 'dependency',
-          agent: 'deps',
-          content: `Updated dependency graph${deps.aiInsights ? ' with AI analysis' : ''}`,
-          level: 'info'
-        };
-        break;
-    }
-
-    if (activityMessage) {
-      setMessages(prev => [...prev, activityMessage!]);
-      
-      if (autoScroll && containerRef.current) {
-        containerRef.current.scrollTop = containerRef.current.scrollHeight;
+  useEffect(() => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const agents = await agentsApi.getAgents();
+        // Process agent statuses
+        Object.entries(agents).forEach(([name, state]) => {
+          if (state.last_error) {
+            setMessages(prev => [...prev, {
+              timestamp: new Date().toISOString(),
+              type: 'status',
+              agent: name,
+              content: state.last_error || 'Unknown error',
+              level: 'error'
+            }]);
+          }
+        });
+      } catch (error) {
+        console.error('Error polling agent status:', error);
       }
-    }
-  };
+    }, 5000);
 
-  useWebSocket({ onMessage: handleMessage });
+    return () => clearInterval(pollInterval);
+  }, []);
+
+  useEffect(() => {
+    if (autoScroll && messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, autoScroll]);
 
   const handleClear = () => {
     setMessages([]);
@@ -121,27 +93,21 @@ export function SwarmActivity({ className = '' }: SwarmActivityProps) {
           </label>
         </div>
       </div>
-
-      <div
-        ref={containerRef}
-        className="flex-1 overflow-auto rounded-lg border border-slate-800 bg-slate-900/50 font-mono text-sm"
-      >
-        <div className="p-4 space-y-1">
-          {messages.map((message, index) => (
-            <pre
-              key={index}
-              className={`whitespace-pre-wrap break-all font-mono text-xs ${getMessageColor(message)}`}
-            >
-              <span className="text-slate-500">{message.timestamp}</span>
-              {' '}
-              <span className="font-semibold">[{message.agent}]</span>
-              {' '}
-              <span className="font-semibold">({message.type})</span>
-              {' '}
-              {message.content}
-            </pre>
-          ))}
-        </div>
+      <div className="flex-1 overflow-y-auto bg-slate-900 rounded p-4">
+        {messages.map((message, index) => (
+          <div key={index} className="mb-2">
+            <span className="text-xs text-slate-500">
+              {new Date(message.timestamp).toLocaleTimeString()}
+            </span>
+            <span className="ml-2 text-sm">
+              <span className="text-slate-400">[{message.agent}]</span>
+              <span className={`ml-2 ${getMessageColor(message)}`}>
+                {message.content}
+              </span>
+            </span>
+          </div>
+        ))}
+        <div ref={messagesEndRef} />
       </div>
     </div>
   );
