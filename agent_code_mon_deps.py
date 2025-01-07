@@ -8,13 +8,12 @@ import os
 import logging
 import ast
 import asyncio
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
 import importlib.util
 import re
 from shared import LLMClient, config_manager, AgentLogger
+from shared.file_monitor import FileMonitor
 
 # Set up logging
 logger = AgentLogger('code_mon_deps')
@@ -461,27 +460,22 @@ class DependencyVisualizer:
         except Exception as e:
             logger.error(f"Error updating visualization: {e}")
 
-class PyFileHandler(FileSystemEventHandler):
-    """Handles Python file modification events."""
+class DependencyMonitor:
+    """Monitors Python files for dependency changes."""
 
     def __init__(self, path: str):
         self.analyzer = DependencyAnalyzer(path)
         self.visualizer = DependencyVisualizer(self.analyzer)
+        self.file_monitor = FileMonitor('code_mon_deps', self.handle_file_change)
         self.queue = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
-        logger.info("File handler initialized")
+        logger.info("Dependency monitor initialized")
 
-    def on_modified(self, event) -> None:
-        """Handle file modification events."""
-        if event.is_directory:
-            return
-
-        if not event.src_path.endswith('.py'):
-            return
-
-        logger.info(f"Detected modification to {event.src_path}")
+    def handle_file_change(self, file_path: str) -> None:
+        """Handle file change event."""
+        logger.info(f"Detected modification to {file_path}")
         # Add to queue for processing
-        asyncio.create_task(self.queue.put(event.src_path))
+        asyncio.create_task(self.queue.put(file_path))
 
     async def start_processing(self):
         """Start processing the file queue."""
@@ -500,28 +494,26 @@ class PyFileHandler(FileSystemEventHandler):
                 logger.error(f"Error in queue processor: {e}")
                 await asyncio.sleep(1)
 
-    def start(self):
-        """Start the queue processor."""
+    def start(self, path: str):
+        """Start monitoring."""
         if not self._task or self._task.done():
             self._task = asyncio.create_task(self.start_processing())
+        self.file_monitor.start(path)
 
     def stop(self):
-        """Stop the queue processor."""
+        """Stop monitoring."""
         if self._task:
             self._task.cancel()
+        self.file_monitor.stop()
 
 async def main(path: str) -> None:
     """Main function to run the dependency graph agent."""
     try:
-        event_handler = PyFileHandler(path)
-        event_handler.start()
+        monitor = DependencyMonitor(path)
+        monitor.start(path)
 
         # Generate initial visualization
-        await event_handler.visualizer.update_visualization()
-
-        observer = Observer()
-        observer.schedule(event_handler, path, recursive=True)
-        observer.start()
+        await monitor.visualizer.update_visualization()
 
         logger.info(f"Started monitoring directory: {path}")
 
@@ -530,9 +522,7 @@ async def main(path: str) -> None:
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
             logger.info("Received shutdown signal")
-            observer.stop()
-            event_handler.stop()
-        observer.join()
+            monitor.stop()
 
     except Exception as e:
         logger.error(f"Fatal error: {e}")

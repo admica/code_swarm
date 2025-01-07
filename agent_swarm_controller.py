@@ -264,7 +264,7 @@ class LLMService:
                         "prompt": request.prompt,
                         "stream": False,
                         "options": {
-                            "temperature": request.temperature if request.temperature is not None else 0.7,
+                            "temperature": request.temperature if request.temperature is not None else 0.6,
                             "max_tokens": request.max_tokens if request.max_tokens is not None else None
                         }
                     },

@@ -134,13 +134,22 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
       };
 
       ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
+        // Extract any available error information
+        const errorInfo = {
+          type: error.type,
+          message: error instanceof Error ? error.message : 'Unknown error',
+          timestamp: new Date().toISOString()
+        };
+
+        console.error('WebSocket error:', errorInfo);
+        
         addLog({
-          timestamp: new Date().toISOString(),
+          timestamp: errorInfo.timestamp,
           type: 'status',
           agent: 'system',
-          content: 'WebSocket error occurred',
-          level: 'error'
+          content: `WebSocket error: ${errorInfo.message}. Check browser console for details.`,
+          level: 'error',
+          details: `Type: ${errorInfo.type}`
         });
       };
     } catch (error) {
