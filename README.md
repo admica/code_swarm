@@ -82,30 +82,25 @@ A Next.js web application that provides:
    cd code_swarm
    ```
 
-2. Install backend dependencies:
+2. Run the setup script to install all dependencies:
    ```bash
-   pip install -r requirements.txt
+   python setup.py
    ```
 
-3. Install frontend dependencies:
+3. Start the application:
    ```bash
-   cd frontend
-   npm install
-   cd ..
+   python run.py
    ```
 
-4. Start the backend server:
-   ```bash
-   python agent_swarm_controller.py
-   ```
+4. Open http://localhost:3000 in your browser
 
-5. In a new terminal, start the frontend:
-   ```bash
-   cd frontend
-   npm run dev
-   ```
+The application will automatically:
+- Start the backend server on port 8000
+- Start the frontend development server on port 3000
+- Set up WebSocket connections for real-time logging
+- Initialize all required services
 
-6. Open http://localhost:3000 in your browser
+To stop the application, press Ctrl+C in the terminal where run.py is running.
 
 ## Configuration
 
