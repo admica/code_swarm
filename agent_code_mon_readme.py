@@ -14,6 +14,7 @@ from watchdog.events import FileSystemEventHandler
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from shared import LLMClient, config_manager, AgentLogger
+import fnmatch
 
 # Set up logging
 logger = AgentLogger('code_mon_readme')
@@ -275,7 +276,18 @@ class PyFileHandler(FileSystemEventHandler):
         self.generator = ReadmeGenerator()
         self.queue = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
+        self.config = config_manager.get_agent_config('code_mon_readme')
+        self.ignore_patterns = self.config.get('ignore_patterns', '').split(',')
         logger.info("File handler initialized")
+
+    def should_ignore(self, file_path: str) -> bool:
+        """Check if a file should be ignored based on patterns."""
+        rel_path = os.path.relpath(file_path)
+        return any(
+            fnmatch.fnmatch(rel_path, pattern.strip())
+            for pattern in self.ignore_patterns
+            if pattern.strip()
+        )
 
     def process_existing_files(self, path: str) -> None:
         """Process all existing code files in the directory that don't have READMEs."""
@@ -285,6 +297,10 @@ class PyFileHandler(FileSystemEventHandler):
                     continue
 
                 file_path = os.path.join(root, file)
+                if self.should_ignore(file_path):
+                    logger.debug(f"Ignoring file due to pattern match: {file_path}")
+                    continue
+
                 readme_path = f"{file_path}_README.md"
 
                 if os.path.exists(readme_path):
@@ -307,6 +323,10 @@ class PyFileHandler(FileSystemEventHandler):
 
         file_path = event.src_path
         if not file_path.endswith('.py') and not file_path.endswith('.lua'):
+            return
+
+        if self.should_ignore(file_path):
+            logger.debug(f"Ignoring modified file due to pattern match: {file_path}")
             return
 
         logger.info(f"Detected modification to {file_path}")

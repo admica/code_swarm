@@ -14,6 +14,7 @@ import importlib.util
 import re
 from shared import LLMClient, config_manager, AgentLogger
 from shared.file_monitor import FileMonitor
+import fnmatch
 
 # Set up logging
 logger = AgentLogger('code_mon_deps')
@@ -44,16 +45,31 @@ class DependencyAnalyzer:
     def get_all_python_files(self) -> List[str]:
         """Get all Python files in the project."""
         python_files = []
+        ignore_patterns = [pattern.strip() for pattern in self.config['ignore_patterns'].split(',')]
+        
         for root, _, files in os.walk(self.root_path):
             depth = root[len(self.root_path):].count(os.sep)
             if depth > self.max_depth:
                 continue
 
             for file in files:
-                if file.endswith('.py') and not any(
-                    pattern in file for pattern in self.config['ignore_patterns'].split(',')
-                ):
-                    python_files.append(os.path.join(root, file))
+                if not file.endswith('.py'):
+                    continue
+                    
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, self.root_path)
+                
+                # Check if file matches any ignore pattern
+                should_ignore = any(
+                    fnmatch.fnmatch(rel_path, pattern)
+                    for pattern in ignore_patterns
+                )
+                
+                if not should_ignore:
+                    python_files.append(full_path)
+                else:
+                    logger.debug(f"Ignoring file due to pattern match: {rel_path}")
+                    
         return python_files
 
     def analyze_imports(self, node: ast.AST, file_path: str) -> Dict[str, Set[str]]:
