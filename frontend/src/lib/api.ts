@@ -117,7 +117,9 @@ class AgentsApi {
 
   async updateSkipList(skipList: string[]) {
     try {
-      const response = await this.axiosInstance.post('/config/skip-list', { skip_list: skipList });
+      const response = await this.axiosInstance.post('/config/skip-list', {
+        skip_list: skipList
+      });
       return response.data;
     } catch (error) {
       return handleApiError(error);

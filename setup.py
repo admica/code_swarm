@@ -87,7 +87,7 @@ def main():
         sys.exit(1)
 
     logger.info("Setup completed successfully!")
-    logger.info("You can now run Code Swarm using: python run_code_swarm.py")
+    logger.info("You can now run Code Swarm using: python run.py")
 
 if __name__ == "__main__":
     main() 

@@ -714,6 +714,9 @@ class SwarmController:
                 pass
             self.monitor_task = None
 
+class SkipListUpdate(BaseModel):
+    skip_list: List[str]
+
 # Initialize FastAPI app and services
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -887,9 +890,9 @@ async def generate_llm_content(request: LLMRequest) -> LLMResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.post("/config/skip-list")
-async def update_skip_list(skip_list: List[str]):
+async def update_skip_list(request: SkipListUpdate):
     """Update the skip list configuration."""
-    return controller.update_skip_list(skip_list)
+    return controller.update_skip_list(request.skip_list)
 
 @api_router.get("/config/ai-markers")
 async def get_ai_markers():
@@ -931,51 +934,61 @@ app.include_router(api_router)
 async def websocket_logs(websocket: WebSocket):
     """Stream logs from all agents and controller via WebSocket."""
     tasks = []
+    is_connected = False
     try:
         await websocket.accept()
+        is_connected = True
         logger.info("New client connected to log stream")
 
         async def tail_log(file_path: Path):
             """Tail a log file and send updates via WebSocket."""
-            while True:
+            nonlocal is_connected
+            while is_connected:
                 try:
                     # Wait for file to exist
-                    while not file_path.exists():
+                    while not file_path.exists() and is_connected:
                         await asyncio.sleep(1)
                         continue
+
+                    if not is_connected:
+                        return
 
                     async with aiofiles.open(file_path, 'r') as f:
                         # Seek to end initially
                         await f.seek(0, 2)
 
-                        while True:
-                            line = await f.readline()
-                            if not line:
-                                # Check if file still exists (handle deletion)
-                                if not file_path.exists():
-                                    break
-                                await asyncio.sleep(0.1)
-                                continue
-
+                        while is_connected:
                             try:
-                                await websocket.send_text(line.strip())
+                                line = await f.readline()
+                                if not line:
+                                    # Check if file still exists (handle deletion)
+                                    if not file_path.exists():
+                                        break
+                                    await asyncio.sleep(0.1)
+                                    continue
+
+                                if is_connected:
+                                    await websocket.send_text(line.strip())
                             except WebSocketDisconnect:
-                                logger.info(f"Client disconnected while sending log from {file_path}")
-                                return
+                                return  # Client disconnected, exit gracefully
                             except Exception as e:
-                                logger.error(f"Error sending log from {file_path}: {e}")
-                                return  # Stop this task on error
+                                if is_connected:
+                                    logger.error(f"Error sending log from {file_path}: {e}")
+                                    await asyncio.sleep(1)  # Backoff on error
+                                continue
 
                 except FileNotFoundError:
                     # File was deleted, wait for recreation
-                    logger.warning(f"Log file deleted: {file_path}, waiting for recreation")
+                    logger.debug(f"Waiting for log file: {file_path}")
+                    await asyncio.sleep(1)
                     continue
                 except PermissionError:
                     logger.error(f"Permission denied reading log file: {file_path}")
-                    return
+                    await asyncio.sleep(5)  # Longer backoff for permission issues
+                    continue
                 except Exception as e:
                     logger.error(f"Error tailing log {file_path}: {e}")
-                    await asyncio.sleep(1)  # Prevent tight loop on persistent errors
+                    await asyncio.sleep(1)  # Backoff on error
                     continue
 
         try:
@@ -984,9 +997,10 @@ async def websocket_logs(websocket: WebSocket):
             log_dir.mkdir(exist_ok=True)
 
             # Send initial connection message
-            await websocket.send_text(
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - system - INFO - Connected to log stream"
-            )
+            if is_connected:
+                await websocket.send_text(
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - system - INFO - Connected to log stream"
+                )
 
             # Controller log
             controller_log = log_dir / 'swarm_controller.log'
@@ -1005,50 +1019,43 @@ async def websocket_logs(websocket: WebSocket):
 
             logger.info(f"Started {len(tasks)} log tailing tasks")
 
-            # Wait for all tasks to complete or connection to close
-            done, pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_EXCEPTION  # Only stop on actual errors
-            )
-
-            # Check if any task failed
-            for task in done:
-                try:
-                    await task
-                except Exception as e:
-                    logger.error(f"Task failed: {e}")
-                    raise  # Re-raise to trigger cleanup
+            # Wait for all tasks to complete
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
-            error_msg = f"Error setting up log streaming: {e}"
+            error_msg = f"Error in log streaming: {e}"
             logger.error(error_msg)
-            await websocket.send_text(
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - system - ERROR - {error_msg}"
-            )
-            raise
+            if is_connected:
+                try:
+                    await websocket.send_text(
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - system - ERROR - {error_msg}"
+                    )
+                except Exception:
+                    pass  # Ignore send errors during shutdown
 
     except WebSocketDisconnect:
         logger.info("Client disconnected from log stream")
     except Exception as e:
         logger.error(f"Unexpected error in websocket handler: {e}")
     finally:
+        is_connected = False
+        
         # Clean up all tasks
         for task in tasks:
             if not task.done():
                 task.cancel()
-                try:
-                    await asyncio.shield(task)  # Ensure task cleanup completes
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    logger.error(f"Error cancelling task: {e}")
         
-        # Ensure websocket is closed
-        try:
-            await websocket.close()
-        except Exception as e:
-            logger.error(f"Error closing websocket: {e}")
-        
+        # Wait for all tasks to complete cleanup
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Only try to close if we successfully connected
+        if is_connected:
+            try:
+                await websocket.close()
+            except Exception as e:
+                logger.debug(f"Error closing websocket: {e}")  # Downgraded to debug since this is expected sometimes
+
         logger.info("Cleaned up all tasks and closed websocket")
 
 def main():

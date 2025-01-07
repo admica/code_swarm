@@ -51,7 +51,7 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
     try {
       // Clear any existing connection and timeout
       if (wsRef.current) {
-        wsRef.current.close();
+        wsRef.current.close(1000, 'Normal closure');  // Use normal closure code
         wsRef.current = null;
       }
       if (reconnectTimeoutRef.current) {
@@ -84,24 +84,30 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
       };
 
       ws.onclose = (event) => {
-        setWsStatus('disconnected');
+        // Clear existing connection
+        wsRef.current = null;
         
         // Don't increment attempts if it was a normal closure
         const wasNormalClosure = event.code === 1000 || event.code === 1001;
         
+        if (wasNormalClosure) {
+          setWsStatus('disconnected');
+          return;  // Don't attempt to reconnect on normal closure
+        }
+
+        // Only log abnormal closures
         addLog({
           timestamp: new Date().toISOString(),
           type: 'status',
           agent: 'system',
           content: `Disconnected from log stream (code: ${event.code})${event.reason ? ': ' + event.reason : ''}`,
-          level: wasNormalClosure ? 'info' : 'warning'
+          level: 'warning'
         });
 
-        // Clear existing connection
-        wsRef.current = null;
+        setWsStatus('disconnected');
 
-        // Attempt to reconnect if not at max attempts and not a normal closure
-        if (!wasNormalClosure && connectionAttempts < MAX_RETRY_ATTEMPTS) {
+        // Attempt to reconnect if not at max attempts
+        if (connectionAttempts < MAX_RETRY_ATTEMPTS) {
           const nextAttempt = connectionAttempts + 1;
           const currentDelay = Math.min(
             RETRY_DELAY * Math.pow(RETRY_BACKOFF, connectionAttempts),
@@ -127,30 +133,16 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
             timestamp: new Date().toISOString(),
             type: 'status',
             agent: 'system',
-            content: wasNormalClosure ? 'Connection closed normally' : 'Maximum reconnection attempts reached. Please refresh the page.',
-            level: wasNormalClosure ? 'info' : 'error'
+            content: 'Maximum reconnection attempts reached. Please refresh the page.',
+            level: 'error'
           });
         }
       };
 
       ws.onerror = (error) => {
-        // Extract any available error information
-        const errorInfo = {
-          type: error.type,
-          message: error instanceof Error ? error.message : 'Unknown error',
-          timestamp: new Date().toISOString()
-        };
-
-        console.error('WebSocket error:', errorInfo);
-        
-        addLog({
-          timestamp: errorInfo.timestamp,
-          type: 'status',
-          agent: 'system',
-          content: `WebSocket error: ${errorInfo.message}. Check browser console for details.`,
-          level: 'error',
-          details: `Type: ${errorInfo.type}`
-        });
+        // Don't log WebSocket errors as they're followed by onclose events
+        // Just update the status
+        setWsStatus('error');
       };
     } catch (error) {
       console.error('Error connecting to WebSocket:', error);
