@@ -130,4 +130,4 @@ The frontend communicates with the backend through:
 
 ## License
 
-[Add your license here]
+GPL3]

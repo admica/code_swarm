@@ -72,36 +72,61 @@ endpoint = http://localhost:11434
   - Get Ollama service status
   - Response: `LLMStatus`
 
-- `POST /api/llm/readme/generate`
-  - Generate README content
+- `GET /api/llm/metrics`
+  - Get LLM usage metrics
+  - Response: `LLMMetrics`
+
+- `GET /api/llm/health`
+  - Quick health check for LLM service
+  - Response: `{ status: string, response_time: number }`
+
+- `POST /api/llm/generate`
+  - Generic endpoint for LLM content generation
   - Body: `LLMRequest`
   - Response: `LLMResponse`
 
-- `POST /api/llm/changelog/generate`
-  - Generate changelog content
-  - Body: `LLMRequest`
-  - Response: `LLMResponse`
+- `POST /api/config/ai-markers`
+  - Set AI content markers
+  - Query params: `begin`, `end`
+  - Response: `{ success: boolean }`
 
-- `POST /api/llm/deps/analyze`
-  - Analyze dependencies
-  - Body: `LLMRequest`
-  - Response: `LLMResponse`
+- `GET /api/config/ai-markers`
+  - Get AI content markers
+  - Response: `{ begin: string, end: string }`
 
 ### WebSocket
 
-The WebSocket endpoint at `/ws` provides real-time updates for:
-- Agent status changes
-- New changelog entries
-- README updates
-- Dependency graph changes
+The WebSocket endpoint at `/ws/logs` provides real-time log streaming:
+- Streams logs from all agents and controller
+- Handles file rotation and deletion
+- Automatic reconnection
+- Efficient memory usage
+- Real-time log tailing
 
 Message format:
 ```typescript
 interface WebSocketMessage {
-  type: 'agent_update' | 'changelog' | 'readme' | 'dependency';
-  data: AgentState | ChangelogEntry | ReadmeUpdate | DependencyGraph;
+  type: 'agent_update' | 'changelog' | 'readme' | 'dependency' | 'log';
+  data: AgentState | ChangelogEntry | ReadmeUpdate | DependencyGraph | string;
 }
 ```
+
+### LLM Service Features
+
+The LLM service includes:
+- Request queueing and prioritization
+- Automatic retries with exponential backoff
+- Detailed metrics tracking
+- Health monitoring
+- Configurable timeouts
+- Memory-efficient streaming
+
+Metrics tracked:
+- Total requests
+- Success/failure rates
+- Processing times
+- Queue times
+- Per-agent usage
 
 ## Agents
 
@@ -217,14 +242,27 @@ interface LLMResponse {
 
 The controller handles several types of errors:
 1. Agent process failures
+   - Automatic process cleanup
+   - State recovery
+   - Error logging
 2. Path permission issues
-3. LLM service unavailability
+   - Detailed error messages
+   - Permission validation
+   - Automatic directory creation
+3. LLM service issues
+   - Automatic retries
+   - Fallback options
+   - Health monitoring
 4. WebSocket connection issues
+   - Automatic reconnection
+   - Connection state tracking
+   - Resource cleanup
 
 Each error is:
-- Logged appropriately
-- Broadcasted to connected clients
-- Handled with automatic recovery when possible 
+- Logged with full context
+- Reported through appropriate channels
+- Handled with recovery strategies
+- Monitored for patterns
 
 ## License
 
