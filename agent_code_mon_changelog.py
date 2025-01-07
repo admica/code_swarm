@@ -367,7 +367,7 @@ class PyFileHandler(FileSystemEventHandler):
         self.analyzer = analyzer
         logger.info("File handler initialized")
 
-    def on_modified(self, event) -> None:
+    async def on_modified(self, event) -> None:
         """Handle file modification events.
 
         Args:
@@ -395,7 +395,8 @@ class PyFileHandler(FileSystemEventHandler):
             )
 
             # Calculate scores
-            logger.debug("Calculating analysis scores")
+            logger.info("Analyzing changes")
+            await logger.log_activity('analyzing changes in', file_path)
             scores: Dict[str, Optional[float]] = {
                 'syntax': self.analyzer.calculate_syntax_score(new_content),
                 'style': self.analyzer.calculate_style_consistency(file_path, new_content),
@@ -428,6 +429,7 @@ class PyFileHandler(FileSystemEventHandler):
 
             # Update changelog
             logger.debug("Updating changelog")
+            await logger.log_activity('updating changelog for', file_path)
             self.analyzer.update_changelog(file_path, summary)
             logger.info("Changelog updated successfully")
 

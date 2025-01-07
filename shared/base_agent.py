@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from shared.agent_logger import AgentLogger
 
 class BaseFileHandler(FileSystemEventHandler):
     """Base file handler for watching file changes."""
@@ -43,38 +44,20 @@ class BaseAgent(ABC):
         self.running = False
         self.monitor_path: Optional[str] = None
         self.health_check_interval = 30  # seconds
-        self._setup_logging()
-
-    def _setup_logging(self):
-        """Set up logging configuration."""
-        self.logger = logging.getLogger(f'agent_{self.name}')
-        self.logger.setLevel(logging.INFO)
-        
-        # File handler
-        fh = logging.FileHandler(f'agent_{self.name}.log')
-        fh.setLevel(logging.INFO)
-        
-        # Console handler
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
-        
-        # Formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        fh.setFormatter(formatter)
-        ch.setFormatter(formatter)
-        
-        self.logger.addHandler(fh)
-        self.logger.addHandler(ch)
+        self.logger = AgentLogger(self.name)
 
     def _load_config(self, config_path: str) -> Dict[str, str]:
         """Load configuration from file."""
-        config = configparser.ConfigParser()
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Config file not found: {config_path}")
+            return {}
+            
+        config = configparser.ConfigParser()
         config.read(config_path)
-        return dict(config[f'agent_{self.name}'])
+        
+        if self.name not in config:
+            return {}
+            
+        return dict(config[self.name])
 
     async def connect(self):
         """Connect to the controller via WebSocket."""
@@ -157,9 +140,8 @@ class BaseAgent(ABC):
             "data": kwargs
         }
         
-        # Log locally
-        log_func = getattr(self.logger, level.lower(), self.logger.info)
-        log_func(f"[{category}] {message}")
+        # Log locally using AgentLogger
+        await self.logger.log(level, message, category=category, **kwargs)
         
         # Send to controller
         if self.ws:
@@ -282,4 +264,19 @@ class BaseAgent(ABC):
     @abstractmethod
     async def process_file(self, file_path: str):
         """Process a file. Must be implemented by subclasses."""
+        pass 
+
+    async def log_activity(self, action: str, file_path: str) -> None:
+        """Log a high-visibility activity message.
+        
+        Args:
+            action: The action being performed (e.g., 'analyzing', 'generating')
+            file_path: The file being acted upon
+        """
+        rel_path = os.path.relpath(file_path, self.workspace_root) if hasattr(self, 'workspace_root') else file_path
+        message = f"Agent {self.name} is {action} {rel_path}"
+        await self.log('info', message, category='activity', file=rel_path)
+
+    def check_dependencies(self) -> bool:
+        # This method is not implemented in the original code block, so it's left unchanged
         pass 

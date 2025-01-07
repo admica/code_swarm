@@ -156,9 +156,11 @@ class ReadmeGenerator:
     def __init__(self):
         """Initialize the generator with a code analyzer."""
         self.analyzer = CodeAnalyzer()
+        self.logger = AgentLogger('code_mon_readme')
 
     async def generate_readme(self, file_path: str, content: str) -> str:
         """Generate a complete README.md for a code file."""
+        await self.logger.log_activity('analyzing', file_path)
         old_readme = None
         readme_path = f"{file_path}_README.md"
 
@@ -168,6 +170,8 @@ class ReadmeGenerator:
 
         # Analyze the code
         info = self.analyzer.analyze_code(content)
+
+        await self.logger.log_activity('generating README for', file_path)
 
         # Start with file name
         readme = f"# {os.path.basename(file_path)}\n\n"

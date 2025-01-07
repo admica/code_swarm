@@ -20,7 +20,9 @@ class FileMonitor:
         self.config = config_manager.get_agent_config(agent_name)
         self.logger = AgentLogger(agent_name)
         
-        self.watch_patterns = self.config.get('watch_patterns', '*.py').split(',')
+        # Default to monitoring both Python and Lua files if not specified
+        default_patterns = '*.py,*.lua'
+        self.watch_patterns = self.config.get('watch_patterns', default_patterns).split(',')
         self.ignore_patterns = self.config.get('ignore_patterns', '__pycache__/*,.*').split(',')
         
         self.observer: Optional[Observer] = None
