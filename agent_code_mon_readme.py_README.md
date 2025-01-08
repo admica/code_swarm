@@ -5,31 +5,38 @@
 Agent that automatically generates and maintains README files for Python and Lua modules.
 
 (BEGIN AI Generated)
-# README Generator Module
+README Overview:
 
-Automatically generates and maintains README files for Python and Lua modules.
+**Automatic README Generator for Python and Lua Modules**
 
-## Overview
+Generate and maintain accurate README files for your Python and Lua modules with this automated agent.
 
-This module provides a suite of classes and functions to analyze code, extract documentation, and generate readable README files. It supports Python and Lua modules, allowing developers to easily create high-quality documentation for their projects.
+**Key Features:**
 
-## Key Features and Functionality
+* Automatically analyzes code to extract documentation and structure
+* Generates high-quality README files based on extracted information
+* Handles file modification events to ensure READMEs are updated in real-time
 
-* Analyzes code to extract key information and docstrings
-* Generates documentation in the format of a README file
-* Supports both Python and Lua modules
-* Notifies users when code changes are detected, ensuring documentation stays up-to-date
-* Handles file modification events to ensure documentation is updated on every change
+**Functionality:**
 
-## Notable Implementation Details
+* Analyzes code using the CodeAnalyzer class to extract key information
+* Uses the ReadmeGenerator class to create a structured README file
+* Notifies PyFileHandler to handle file modification events
+* Identifies and ignores files based on predefined patterns
 
-* Utilizes the Abstract Syntax Tree (AST) for Python code analysis
-* Leverages regular expressions for efficient pattern matching and filtering
-* Employs a queue processing system to handle multiple files simultaneously, ensuring optimal performance.
+**Notable Implementation Details:**
 
-## Usage
+* Utilizes AST (Abstract Syntax Tree) analysis for accurate code extraction
+* Employs Python's standard library for file handling and event processing
+* Supports both Python and Lua modules, with customizable configuration options
 
-To start using this module, simply import the classes and functions that suit your needs. The `start` method initiates the README generation process, while the `stop` method terminates it.
+**Getting Started:**
+
+1. Install the module using pip: `pip install automatic-readme-generator`
+2. Configure the module to your project by setting environment variables or editing the configuration file.
+3. Start the queue processor using `start` command.
+
+This agent simplifies the process of maintaining README files for Python and Lua modules, ensuring consistency and accuracy across projects.
 
 
 ## Classes

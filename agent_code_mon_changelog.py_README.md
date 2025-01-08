@@ -5,42 +5,31 @@
 Code monitoring agent that tracks changes to Python files and generates changelogs.
 
 (BEGIN AI Generated)
-# Code Monitoring Agent for Python Files
+# Code Monitoring Agent README
 
 ## Overview
 
-This module is a code monitoring agent designed to track changes to Python files and generate changelogs. It utilizes configuration management, code analysis, and Git integration to provide a comprehensive solution for managing code changes.
+This is a code monitoring agent that tracks changes to Python files and generates changelogs. It uses Git events to monitor file modifications, performs syntax checking, style consistency analysis, and AI-driven analysis using a large language model (LLM) service.
 
 ## Key Features and Functionality
 
-*   Tracks changes to Python files and generates changelogs
-*   Utilizes configuration management for loading and validating agent settings
-*   Integrates with Git to retrieve the last committed version of modified files
-*   Analyzes Python code syntax, style consistency, and complexity using Pylint and AI-powered tools
-*   Updates changelog files specific to modified Python files
+* Tracks changes to Python files
+* Generates changelogs for modified files
+* Performs syntax checking using Pylint
+* Analyzes style consistency with other Python files in the project
+* Uses AI LLM service for advanced analysis of code changes
+* Handles file modification events from Git
 
 ## Notable Implementation Details
 
-*   The `ConfigManager` class ensures that configuration is loaded and validated correctly.
-*   The `CodeAnalyzer` class performs in-depth analysis of Python code changes, including syntax checking, style consistency evaluation, and complexity scoring.
-*   The `PyFileHandler` class handles Python file modification events, facilitating seamless integration with the agent.
+* The agent uses a modular design, separating configuration management, code analysis, and AI-driven analysis into distinct classes.
+* The `ConfigManager` class is responsible for loading and validating configuration files, while the `CodeAnalyzer` class performs syntax checking, style consistency analysis, and changelog updates.
 
 ## Usage
 
-To use this module, simply run the `main` function to initiate the code monitoring agent. The agent will automatically load configuration settings and begin tracking changes to Python files in your project directory.
+To use this module, simply run the `main` function to start the agent. You can configure the agent by creating a configuration file or using the default configuration provided by the `create_default_config` function.
 
-```python
-from code_monitoring_agent import main
-
-if __name__ == "__main__":
-    main()
-```
-
-## Requirements
-
-*   Python 3.8 or later
-*   Git installed on the system
-*   Pylint installed as a dependency
+Note: This README is focused on providing an overview of the module's purpose and functionality. For detailed implementation information, please refer to the individual class and function documentation.
 
 
 ## Classes

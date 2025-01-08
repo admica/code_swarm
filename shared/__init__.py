@@ -1,15 +1,15 @@
 """Shared utilities for Code Swarm."""
 
-from .config import config_manager, ConfigurationError
-from .logging import AgentLogger
-from .llm import LLMClient, LLMError
+from .agent_logger import AgentLogger
+from .config import config_manager
+from .llm import LLMClient
+from .base_agent import BaseAgent
 from .file_monitor import FileMonitor
 
 __all__ = [
-    'config_manager',
-    'ConfigurationError',
     'AgentLogger',
+    'config_manager',
     'LLMClient',
-    'LLMError',
+    'BaseAgent',
     'FileMonitor'
 ] 

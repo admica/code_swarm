@@ -20,6 +20,9 @@ import re
 from shared import LLMClient, config_manager, AgentLogger
 from shared.file_monitor import FileMonitor
 import fnmatch
+import json
+from datetime import datetime
+from shared.base_agent import BaseAgent
 
 # Set up logging
 logger = AgentLogger('code_mon_deps')
@@ -33,7 +36,7 @@ REQUIRE_PATTERNS = [
     r'''(?:require|dofile|loadfile)\s*\(\s*([^"\'\)]+)\s*\)'''  # Complex expressions
 ]
 
-class DependencyAnalyzer:
+class DependencyAnalyzer(BaseAgent):
     """Analyzes source code dependencies."""
 
     def __init__(self, root_path: str):
@@ -42,6 +45,7 @@ class DependencyAnalyzer:
         Args:
             root_path: The root directory to analyze
         """
+        super().__init__('code_mon_deps')
         self.root_path = root_path
         self.logger = AgentLogger('code_mon_deps')
         self.llm_client = LLMClient('code_mon_deps')
@@ -276,7 +280,7 @@ class DependencyAnalyzer:
         self.logger.info(f"Completed analysis of {len(dependencies)} files")
         return dependencies
 
-class DependencyMonitor:
+class DependencyMonitor(BaseAgent):
     """Monitors source files for dependency changes."""
 
     def __init__(self, path: str):
@@ -285,6 +289,7 @@ class DependencyMonitor:
         Args:
             path: The root directory to monitor.
         """
+        super().__init__('code_mon_deps')
         self.analyzer = DependencyAnalyzer(path)
         self.visualizer = DependencyVisualizer(self.analyzer)
         self.file_monitor = FileMonitor('code_mon_deps', self.handle_file_change)
@@ -301,7 +306,7 @@ class DependencyMonitor:
         self._cache_lock = asyncio.Lock()
         logger.info("Dependency monitor initialized with update delay: %s", self._update_delay)
 
-    def handle_file_change(self, file_path: str) -> None:
+    async def handle_file_change(self, file_path: str) -> None:
         """Handle file change event."""
         try:
             file_lower = file_path.lower()
@@ -309,7 +314,12 @@ class DependencyMonitor:
                 return
 
             logger.info(f"Detected modification to {file_path}")
-            asyncio.create_task(self.queue.put(file_path))
+            # Send activity message
+            await self.send_activity(
+                action="file_modified",
+                file_path=file_path
+            )
+            await self.queue.put(file_path)
         except Exception as e:
             logger.error(f"Error handling file change for {file_path}: {str(e)}", exc_info=True)
 
@@ -329,8 +339,24 @@ class DependencyMonitor:
                     # Use lock to protect cache and visualization operations
                     async with self._cache_lock:
                         if os.path.exists(file_path):
+                            # Send analysis start message
+                            await self.send_activity(
+                                action="analyzing_dependencies",
+                                file_path=file_path
+                            )
+                            
                             self.analyzer.invalidate_file(file_path)  # Only invalidate affected files
                             await self.visualizer.update_visualization()
+                            
+                            # Send analysis complete message
+                            await self.send_activity(
+                                action="analysis_complete",
+                                file_path=file_path,
+                                details={
+                                    "dependencies": len(self.analyzer._cache.get(file_path, [])),
+                                    "dependents": len(self.analyzer._dependents.get(file_path, set()))
+                                }
+                            )
                 except Exception as e:
                     logger.error(f"Error updating visualization for {file_path}: {str(e)}", exc_info=True)
                 finally:
@@ -342,14 +368,23 @@ class DependencyMonitor:
                 logger.error(f"Error in queue processor: {str(e)}", exc_info=True)
                 await asyncio.sleep(1)
 
-    def start(self, path: str):
+    async def start(self, path: str):
         """Start monitoring."""
+        if not self.running:
+            self.running = True
+            
         if not self._task or self._task.done():
             self._task = asyncio.create_task(self.start_processing())
+            
+        # Start file monitoring
         self.file_monitor.start(path)
+        
+        # Start the BaseAgent run loop and keep running
+        await self.run()  # This will keep running until self.running is False
 
-    def stop(self):
+    async def stop(self):
         """Stop monitoring and clean up resources."""
+        self.running = False
         if self._task:
             self._task.cancel()
         self.file_monitor.stop()
@@ -360,6 +395,7 @@ class DependencyMonitor:
                 self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        await self.disconnect()  # Disconnect WebSockets
 
 class DependencyVisualizer:
     """Generates and maintains dependency visualizations."""
@@ -478,6 +514,16 @@ class DependencyVisualizer:
                 "highly_coupled": []
             }
 
+            # Send AI analysis start message
+            await self.analyzer.send_activity(
+                action="starting_ai_analysis",
+                file_path="project_dependencies",
+                details={
+                    "total_files": analysis["total_files"],
+                    "files_with_deps": analysis["files_with_deps"]
+                }
+            )
+
             # Find circular dependencies
             for file_path, deps in dependencies.items():
                 for dep in deps:
@@ -504,8 +550,12 @@ class DependencyVisualizer:
 
             # Create the prompt
             prompt = f"""Analyze this project's dependency structure:
-
-Project Statistics:
+COUPLING LEVELS:
+- LOW: 0-5 dependencies (typical for utility modules)
+- MODERATE: 6-8 dependencies (common for core modules)
+- HIGH: 9-11 dependencies (investigate if necessary)
+- EXCESSIVE: 12+ dependencies (should be refactored)
+PROJECT STATISTICS:
 - Total source files: {analysis['total_files']}
 - Files with dependencies: {analysis['files_with_deps']}
 - Average dependencies per file: {analysis['avg_deps']}
@@ -519,17 +569,29 @@ Project Statistics:
 
 Please provide:
 1. A balanced assessment of the project's modularity
-2. Note any potential areas for improvement, but consider that some coupling is normal and necessary
+2. Note any potential areas/ideas for significant improvement
 3. If suggesting improvements, focus on significant patterns rather than isolated cases
-Keep the response under 300 words and maintain a positive constructive tone."""
+Keep the response under 290 words and maintain a positive constructive tone."""
 
             result = await self.analyzer.llm_client.generate(
                 prompt=prompt,
-                max_tokens=1400,
+                max_tokens=1320,
                 temperature=0.6
             )
 
-            return result.get('response') if result else None
+            if result and result.get('response'):
+                # Send AI analysis complete message
+                await self.analyzer.send_activity(
+                    action="ai_analysis_complete",
+                    file_path="project_dependencies",
+                    details={
+                        "analysis": result['response'],
+                        "metrics": analysis
+                    }
+                )
+                return result['response']
+
+            return None
 
         except Exception as e:
             self.logger.error(f"Unexpected error in AI analysis: {e}")
@@ -606,18 +668,13 @@ async def main(path: str) -> None:
     try:
         # Initialize monitor
         monitor = DependencyMonitor(path)
+        monitor.running = True  # Set running state before starting
 
         # Generate initial visualization before starting monitor
         vis_path = os.path.join(path, 'dependency_graph.md')
         if not os.path.exists(vis_path):
             logger.info("No existing dependency graph found. Generating initial visualization...")
             try:
-                # Create event loop if needed (for subprocess case)
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                # Generate initial visualization
                 await monitor.visualizer.update_visualization()
                 logger.info("Initial dependency graph generated successfully")
             except Exception as e:
@@ -626,17 +683,8 @@ async def main(path: str) -> None:
         else:
             logger.info(f"Found existing dependency graph at {vis_path}")
 
-        # Start monitoring
-        monitor.start(path)
-
-        try:
-            # Keep running until interrupted
-            while True:
-                await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            logger.info("Dependency monitor shutting down...")
-            monitor.stop()
-            raise
+        # Start monitoring and keep running
+        await monitor.start(path)  # This will start both file monitoring and the BaseAgent run loop
 
     except Exception as e:
         logger.error(f"Error in dependency monitor: {str(e)}", exc_info=True)

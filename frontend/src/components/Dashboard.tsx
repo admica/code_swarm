@@ -3,7 +3,8 @@ import { AgentCard } from '@/components/agents/AgentCard';
 import { MonitorPathSelector } from '@/components/MonitorPathSelector';
 import { ControllerOutput } from '@/components/ControllerOutput';
 import { SwarmActivity } from '@/components/SwarmActivity';
-import { DetailedLogs } from '@/components/DetailedLogs';
+import { LogWindow } from '@/components/LogWindow';
+import { AgentMessages } from '@/components/AgentMessages';
 import { ConnectionStatus } from '@/lib/websocket';
 import { useState } from 'react';
 
@@ -90,7 +91,7 @@ export function Dashboard({
         {/* Logs Pane */}
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold text-white">Logs</h2>
+            <h2 className="text-xl font-semibold text-white">Logs & Messages</h2>
             <button
               onClick={() => setShowLogs(!showLogs)}
               className="px-3 py-1 rounded text-sm font-medium bg-slate-700 text-slate-300 hover:bg-slate-600"
@@ -99,7 +100,10 @@ export function Dashboard({
             </button>
           </div>
           {showLogs && (
-            <DetailedLogs agents={Object.keys(agents)} />
+            <div className="grid grid-cols-1 gap-4">
+              <LogWindow agents={Object.keys(agents)} />
+              <AgentMessages />
+            </div>
           )}
         </div>
       </div>

@@ -717,6 +717,137 @@ class SwarmController:
 class SkipListUpdate(BaseModel):
     skip_list: List[str]
 
+class AgentMessageManager:
+    """Manages WebSocket connections for agent messages and frontend clients."""
+    
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}  # agent_name -> websocket
+        self.frontend_connections: Set[WebSocket] = set()
+        self.logger = logging.getLogger('swarm_controller')
+        self.connection_counts = {
+            'frontend': 0,
+            'agent': 0
+        }
+        self.logger.info("AgentMessageManager initialized")
+
+    async def connect_frontend(self, websocket: WebSocket):
+        """Connect a frontend client."""
+        await websocket.accept()
+        self.frontend_connections.add(websocket)
+        self.connection_counts['frontend'] += 1
+        self.logger.info(f"Frontend client connected (Total frontends: {self.connection_counts['frontend']})")
+        
+        try:
+            initial_message = {
+                "type": "system",
+                "timestamp": datetime.now().isoformat(),
+                "message": "Connected to agent message stream"
+            }
+            await websocket.send_json(initial_message)
+        except Exception as e:
+            self.logger.error(f"Error sending initial message: {e}")
+
+    async def connect_agent(self, websocket: WebSocket, agent_name: str):
+        """Connect an agent."""
+        if agent_name in self.active_connections:
+            self.logger.info(f"Closing existing connection for agent: {agent_name}")
+            try:
+                await self.active_connections[agent_name].close()
+            except Exception as e:
+                self.logger.error(f"Error closing existing connection: {e}")
+        
+        self.active_connections[agent_name] = websocket
+        self.connection_counts['agent'] += 1
+        self.logger.info(f"Agent connected: {agent_name} (Total agents: {self.connection_counts['agent']})")
+
+        # Send confirmation message back to agent
+        try:
+            await websocket.send_json({
+                "type": "connection_confirmed",
+                "timestamp": datetime.now().isoformat(),
+                "agent": agent_name
+            })
+        except Exception as e:
+            self.logger.error(f"Error sending connection confirmation: {e}")
+
+    async def disconnect_frontend(self, websocket: WebSocket):
+        """Disconnect a frontend client."""
+        if websocket in self.frontend_connections:
+            self.frontend_connections.remove(websocket)
+            self.connection_counts['frontend'] -= 1
+            self.logger.info(f"Frontend client disconnected (Remaining frontends: {self.connection_counts['frontend']})")
+
+    async def disconnect_agent(self, agent_name: str):
+        """Disconnect an agent."""
+        if agent_name in self.active_connections:
+            try:
+                await self.active_connections[agent_name].close()
+            except Exception as e:
+                self.logger.error(f"Error closing agent connection: {e}")
+            del self.active_connections[agent_name]
+            self.connection_counts['agent'] -= 1
+            self.logger.info(f"Agent disconnected: {agent_name} (Remaining agents: {self.connection_counts['agent']})")
+
+            # Notify frontends of agent disconnection
+            await self.broadcast_to_frontends({
+                "type": "agent_disconnected",
+                "timestamp": datetime.now().isoformat(),
+                "agent": agent_name
+            })
+
+    async def broadcast_to_frontends(self, message: dict):
+        """Broadcast a message to all connected frontend clients."""
+        if not isinstance(message, dict):
+            self.logger.error(f"Invalid message format (not a dict): {message}")
+            return
+            
+        if "type" not in message or "timestamp" not in message:
+            self.logger.error(f"Invalid message format (missing required fields): {message}")
+            return
+
+        self.logger.debug(f"Broadcasting message to {len(self.frontend_connections)} frontends: {message}")
+
+        disconnected = set()
+        successful = 0
+        for client in self.frontend_connections:
+            try:
+                await client.send_json(message)
+                successful += 1
+            except WebSocketDisconnect:
+                self.logger.info("Frontend disconnected during broadcast")
+                disconnected.add(client)
+            except Exception as e:
+                self.logger.error(f"Error sending message to frontend: {e}")
+                disconnected.add(client)
+        
+        # Clean up disconnected clients
+        for client in disconnected:
+            await self.disconnect_frontend(client)
+            
+        self.logger.debug(f"Broadcast complete. Successful: {successful}, Failed: {len(disconnected)}")
+
+    async def send_to_agent(self, agent_name: str, message: dict):
+        """Send a message to a specific agent."""
+        if agent_name not in self.active_connections:
+            self.logger.error(f"No active connection for agent: {agent_name}")
+            return False
+
+        try:
+            await self.active_connections[agent_name].send_json(message)
+            return True
+        except Exception as e:
+            self.logger.error(f"Error sending message to agent {agent_name}: {e}")
+            await self.disconnect_agent(agent_name)
+            return False
+
+    def get_connection_status(self) -> dict:
+        """Get current connection status."""
+        return {
+            "frontend_connections": self.connection_counts['frontend'],
+            "agent_connections": self.connection_counts['agent'],
+            "active_agents": list(self.active_connections.keys())
+        }
+
 # Initialize FastAPI app and services
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -738,10 +869,10 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Your frontend URL
+    allow_origins=["*"],  # Allows all origins
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
 # Create API router
@@ -1057,6 +1188,102 @@ async def websocket_logs(websocket: WebSocket):
                 logger.debug(f"Error closing websocket: {e}")  # Downgraded to debug since this is expected sometimes
 
         logger.info("Cleaned up all tasks and closed websocket")
+
+# Initialize the manager
+agent_message_manager = AgentMessageManager()
+
+# Add WebSocket endpoint for agent messages
+@app.websocket("/ws/agent")
+async def websocket_agent(websocket: WebSocket):
+    """WebSocket endpoint for agent messages."""
+    logger = logging.getLogger('swarm_controller')
+    logger.info(f"New WebSocket connection attempt from {websocket.client}")
+    
+    try:
+        # Accept the connection first
+        await websocket.accept()
+        logger.info("WebSocket connection accepted")
+        
+        # Wait for initial message to determine connection type
+        initial_message = await websocket.receive_json()
+        logger.info(f"Received initial message: {initial_message}")
+        
+        if initial_message.get("type") == "frontend_connect":
+            # Handle frontend connection
+            logger.info("Processing frontend connection")
+            await agent_message_manager.connect_frontend(websocket)
+            
+            try:
+                while True:
+                    # Keep connection alive and handle any frontend messages
+                    data = await websocket.receive_json()
+                    logger.debug(f"Received frontend message: {data}")
+                    
+                    # Handle frontend-specific messages here if needed
+                    if data.get("type") == "request_status":
+                        await websocket.send_json({
+                            "type": "connection_status",
+                            "timestamp": datetime.now().isoformat(),
+                            "data": agent_message_manager.get_connection_status()
+                        })
+                    
+            except WebSocketDisconnect:
+                logger.info("Frontend WebSocket disconnected normally")
+                await agent_message_manager.disconnect_frontend(websocket)
+            except Exception as e:
+                logger.error(f"Error in frontend websocket: {e}")
+                await agent_message_manager.disconnect_frontend(websocket)
+                
+        elif initial_message.get("type") == "agent_connect":
+            # Handle agent connection
+            agent_name = initial_message.get("agent")
+            if not agent_name:
+                logger.error("Agent connection missing agent name")
+                await websocket.close()
+                return
+                
+            await agent_message_manager.connect_agent(websocket, agent_name)
+            
+            try:
+                while True:
+                    # Handle agent messages
+                    message = await websocket.receive_json()
+                    logger.debug(f"Received agent message: {message}")
+                    
+                    # Validate message format
+                    if not isinstance(message, dict) or "type" not in message:
+                        logger.error(f"Invalid message format from agent {agent_name}")
+                        continue
+                    
+                    # Add timestamp if not present
+                    if "timestamp" not in message:
+                        message["timestamp"] = datetime.now().isoformat()
+                    
+                    # Add agent name if not present
+                    if "agent" not in message:
+                        message["agent"] = agent_name
+                    
+                    # Broadcast to frontends
+                    await agent_message_manager.broadcast_to_frontends(message)
+                    
+            except WebSocketDisconnect:
+                logger.info(f"Agent WebSocket disconnected normally: {agent_name}")
+                await agent_message_manager.disconnect_agent(agent_name)
+            except Exception as e:
+                logger.error(f"Error in agent websocket: {e}")
+                await agent_message_manager.disconnect_agent(agent_name)
+        else:
+            logger.error(f"Invalid initial message type: {initial_message.get('type')}")
+            await websocket.close()
+            
+    except WebSocketDisconnect:
+        logger.error("WebSocket disconnected during handshake")
+    except Exception as e:
+        logger.error(f"Error in websocket handshake: {e}", exc_info=True)
+        try:
+            await websocket.close()
+        except:
+            pass
 
 def main():
     """Main entry point for the swarm controller."""

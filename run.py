@@ -11,6 +11,8 @@ from pathlib import Path
 import psutil
 import logging
 from typing import Optional, List, Dict
+import threading
+from queue import Queue, Empty
 
 # Set up logging
 logging.basicConfig(
@@ -31,10 +33,15 @@ class ServiceManager:
 
     def _is_port_in_use(self, port: int) -> bool:
         """Check if a port is in use."""
-        for conn in psutil.net_connections():
-            if conn.laddr.port == port:
-                return True
-        return False
+        try:
+            # Only consider LISTEN state as "in use" - ignore TIME_WAIT
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.laddr.port == port and conn.status == 'LISTEN':
+                    return True
+            return False
+        except Exception as e:
+            logger.error(f"Error checking port {port}: {e}")
+            return False
 
     def _wait_for_port(self, port: int, timeout: int = 30) -> bool:
         """Wait for a port to become available."""
@@ -55,36 +62,56 @@ class ServiceManager:
             bool: True if process was killed or no process found, False if kill failed
         """
         try:
-            for conn in psutil.net_connections(kind='inet'):  # Explicitly check internet sockets
-                if conn.laddr.port == port and conn.status == 'LISTEN':  # Only kill listening processes
+            killed_something = False
+            # Only try to kill processes in LISTEN state
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.laddr.port == port and conn.status == 'LISTEN' and conn.pid is not None:
                     try:
                         process = psutil.Process(conn.pid)
-                        logger.info(f"Found existing process on port {port} (PID: {conn.pid})")
+                        logger.info(f"Found listening process on port {port} (PID: {conn.pid})")
 
                         # Try graceful shutdown first
                         process.terminate()
                         try:
-                            process.wait(timeout=3)  # Wait up to 3 seconds for graceful shutdown
+                            process.wait(timeout=5)  # Increased timeout for graceful shutdown
                         except psutil.TimeoutExpired:
                             logger.warning(f"Process {conn.pid} did not terminate gracefully, forcing kill")
                             process.kill()  # Force kill
-                            process.wait(timeout=2)  # Wait for kill to complete
+                            process.wait(timeout=3)  # Increased timeout for force kill
 
-                        # Verify port is actually released
-                        time.sleep(0.5)  # Short wait for OS to release port
-                        if not self._is_port_in_use(port):
-                            logger.info(f"Successfully killed process on port {port}")
-                            return True
-                        else:
-                            logger.error(f"Port {port} still in use after killing process")
-                            return False
+                        # Kill any surviving children
+                        try:
+                            children = process.children(recursive=True)
+                            for child in children:
+                                try:
+                                    child.kill()
+                                except psutil.NoSuchProcess:
+                                    pass
+                            psutil.wait_procs(children, timeout=3)
+                        except psutil.NoSuchProcess:
+                            pass
+
+                        killed_something = True
 
                     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                         logger.error(f"Error accessing process on port {port}: {e}")
-                        return False
+                        continue
+                elif conn.laddr.port == port and conn.status == 'TIME_WAIT':
+                    logger.info(f"Found socket in TIME_WAIT state on port {port} - this is normal, ignoring")
+                    return True  # Consider this a success case
 
-            logger.debug(f"No listening process found on port {port}")
-            return True  # No process to kill is still a success
+            if killed_something:
+                # Wait a bit for the port to be fully released
+                time.sleep(1)
+                if not self._is_port_in_use(port):
+                    logger.info(f"Port {port} successfully released")
+                    return True
+                else:
+                    logger.error(f"Port {port} still in LISTEN state after killing processes")
+                    return False
+
+            logger.debug(f"No listening processes found on port {port}")
+            return True
 
         except Exception as e:
             logger.error(f"Unexpected error killing process on port {port}: {e}")
@@ -119,24 +146,100 @@ class ServiceManager:
                 logger.warning("Backend port 8000 is already in use. Is the service already running?")
                 return False
 
+            # Create process with non-blocking pipes
+            output_queue = Queue()
+            
+            def reader(pipe, queue):
+                try:
+                    with pipe:
+                        for line in iter(pipe.readline, ''):
+                            queue.put(('out' if pipe == process.stdout else 'err', line.strip()))
+                finally:
+                    queue.put(None)
+            
             # Start the backend process
-            self.backend_process = subprocess.Popen(
+            process = subprocess.Popen(
                 [sys.executable, str(self.backend_script)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                bufsize=1,  # Line buffered
+                universal_newlines=True,
+                preexec_fn=os.setsid if os.name != 'nt' else None  # Create new process group on Unix
             )
-
+            
+            # Start output reader threads
+            threading.Thread(target=reader, args=[process.stdout, output_queue], daemon=True).start()
+            threading.Thread(target=reader, args=[process.stderr, output_queue], daemon=True).start()
+            
+            self.backend_process = process
+            
             # Wait for the backend to start
-            if not self._wait_for_port(8000):
-                logger.error("Backend failed to start (timeout waiting for port 8000)")
-                return False
-
-            logger.info("Backend service started successfully")
-            return True
+            start_time = time.time()
+            readers_alive = 2  # Number of reader threads
+            
+            while time.time() - start_time < 30:  # 30 second timeout
+                # Check if process has exited
+                if process.poll() is not None:
+                    # Process exited, drain remaining output
+                    while readers_alive > 0:
+                        try:
+                            item = output_queue.get(timeout=0.1)
+                            if item is None:
+                                readers_alive -= 1
+                                continue
+                            stream, line = item
+                            logger.error(f"Backend {'error' if stream == 'err' else 'output'}: {line}")
+                        except Empty:
+                            break
+                    
+                    logger.error("Backend process exited unexpectedly")
+                    return False
+                
+                # Check for port availability
+                if self._is_port_in_use(8000):
+                    logger.info("Backend service started successfully")
+                    
+                    # Start background thread to handle remaining output
+                    def background_reader():
+                        while True:
+                            try:
+                                item = output_queue.get()
+                                if item is None:
+                                    readers_alive -= 1
+                                    if readers_alive == 0:
+                                        break
+                                    continue
+                                stream, line = item
+                                logger.info(f"Backend {'error' if stream == 'err' else 'output'}: {line}")
+                            except Empty:
+                                continue
+                    
+                    threading.Thread(target=background_reader, daemon=True).start()
+                    return True
+                
+                # Check for any output
+                try:
+                    item = output_queue.get(timeout=0.1)
+                    if item is None:
+                        readers_alive -= 1
+                        continue
+                    stream, line = item
+                    logger.info(f"Backend {'error' if stream == 'err' else 'output'}: {line}")
+                except Empty:
+                    continue
+            
+            logger.error("Backend failed to start (timeout waiting for port 8000)")
+            process.terminate()
+            return False
 
         except Exception as e:
             logger.error(f"Error starting backend: {e}")
+            if self.backend_process:
+                try:
+                    self.backend_process.terminate()
+                except Exception:
+                    pass
             return False
 
     def start_frontend(self) -> bool:
@@ -152,24 +255,101 @@ class ServiceManager:
             # Change to frontend directory
             os.chdir(self.frontend_dir)
 
+            # Create process with non-blocking pipes
+            output_queue = Queue()
+            
+            def reader(pipe, queue):
+                try:
+                    with pipe:
+                        for line in iter(pipe.readline, ''):
+                            queue.put(('out' if pipe == process.stdout else 'err', line.strip()))
+                finally:
+                    queue.put(None)
+
             # Start the frontend process
-            self.frontend_process = subprocess.Popen(
+            process = subprocess.Popen(
                 ['npm', 'run', 'dev'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                bufsize=1,  # Line buffered
+                universal_newlines=True,
+                preexec_fn=os.setsid if os.name != 'nt' else None  # Create new process group on Unix
             )
-
+            
+            # Start output reader threads
+            threading.Thread(target=reader, args=[process.stdout, output_queue], daemon=True).start()
+            threading.Thread(target=reader, args=[process.stderr, output_queue], daemon=True).start()
+            
+            self.frontend_process = process
+            
             # Wait for the frontend to start
-            if not self._wait_for_port(3000):
-                logger.error("Frontend failed to start (timeout waiting for port 3000)")
-                return False
-
-            logger.info("Frontend service started successfully")
-            return True
+            start_time = time.time()
+            readers_alive = 2  # Number of reader threads
+            
+            while time.time() - start_time < 30:  # 30 second timeout
+                # Check if process has exited
+                if process.poll() is not None:
+                    # Process exited, drain remaining output
+                    while readers_alive > 0:
+                        try:
+                            item = output_queue.get(timeout=0.1)
+                            if item is None:
+                                readers_alive -= 1
+                                continue
+                            stream, line = item
+                            logger.error(f"Frontend {'error' if stream == 'err' else 'output'}: {line}")
+                        except Empty:
+                            break
+                    
+                    logger.error("Frontend process exited unexpectedly")
+                    return False
+                
+                # Check for port availability
+                if self._is_port_in_use(3000):
+                    logger.info("Frontend service started successfully")
+                    
+                    # Start background thread to handle remaining output
+                    def background_reader():
+                        nonlocal readers_alive
+                        while True:
+                            try:
+                                item = output_queue.get()
+                                if item is None:
+                                    readers_alive -= 1
+                                    if readers_alive == 0:
+                                        break
+                                    continue
+                                stream, line = item
+                                logger.info(f"Frontend {'error' if stream == 'err' else 'output'}: {line}")
+                            except Empty:
+                                continue
+                    
+                    threading.Thread(target=background_reader, daemon=True).start()
+                    return True
+                
+                # Check for any output
+                try:
+                    item = output_queue.get(timeout=0.1)
+                    if item is None:
+                        readers_alive -= 1
+                        continue
+                    stream, line = item
+                    logger.info(f"Frontend {'error' if stream == 'err' else 'output'}: {line}")
+                except Empty:
+                    continue
+            
+            logger.error("Frontend failed to start (timeout waiting for port 3000)")
+            process.terminate()
+            return False
 
         except Exception as e:
             logger.error(f"Error starting frontend: {e}")
+            if self.frontend_process:
+                try:
+                    self.frontend_process.terminate()
+                except Exception:
+                    pass
             return False
         finally:
             # Change back to original directory
@@ -188,6 +368,11 @@ class ServiceManager:
                 parent = psutil.Process(process.pid)
                 children = parent.children(recursive=True)
 
+                # Log process tree for debugging
+                logger.debug(f"Process tree for PID {process.pid}:")
+                logger.debug(f"Parent: {parent}")
+                logger.debug(f"Children: {children}")
+
                 # First attempt graceful termination of children
                 for child in children:
                     try:
@@ -198,17 +383,20 @@ class ServiceManager:
                 # Then terminate parent
                 parent.terminate()
 
-                # Wait for processes to terminate
-                gone, alive = psutil.wait_procs([parent] + children, timeout=3)
+                # Wait for processes to terminate with increased timeout
+                gone, alive = psutil.wait_procs([parent] + children, timeout=5)
 
                 # Force kill any remaining processes
                 for p in alive:
                     try:
                         logger.warning(f"Force killing process {p.pid}")
                         p.kill()
-                        p.wait(timeout=2)
-                    except (psutil.NoSuchProcess, psutil.TimeoutExpired) as e:
+                    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                         logger.error(f"Error force killing process {p.pid}: {e}")
+
+                # Wait for killed processes
+                if alive:
+                    psutil.wait_procs(alive, timeout=3)
 
             except psutil.NoSuchProcess:
                 pass
@@ -226,11 +414,10 @@ class ServiceManager:
             terminate_process_tree(self.backend_process)
             self.backend_process = None
 
-        # Final verification of port cleanup
-        time.sleep(1)  # Brief wait for processes to fully cleanup
+        # Check for any remaining listening processes
         if self._is_port_in_use(3000) or self._is_port_in_use(8000):
-            logger.warning("Some ports still in use after service shutdown")
-            self._cleanup_ports()  # Final cleanup attempt
+            logger.warning("Found remaining listening processes, attempting cleanup")
+            self._cleanup_ports()
 
         logger.info("All services stopped")
 
