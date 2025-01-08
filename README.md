@@ -56,7 +56,6 @@ The central server that manages all agents and provides API endpoints. Features:
   - Health monitoring
   - Usage metrics
 - Centralized path monitoring
-- Robust error handling
 
 #### Python Agents
 
@@ -64,7 +63,7 @@ The central server that manages all agents and provides API endpoints. Features:
    - Monitors file changes
    - Analyzes code modifications
    - Maintains detailed changelogs
-   - Git-aware (optional)
+   - Git-aware (optional and automatic)
    - AI-powered analysis
 
 2. **README Agent** (agent_code_mon_readme.py)
@@ -78,7 +77,6 @@ The central server that manages all agents and provides API endpoints. Features:
    - Maps project dependencies
    - Creates visual graphs
    - Tracks module relationships
-   - Updates in real-time
    - AI-powered insights
 
 ### Frontend
@@ -96,7 +94,7 @@ A Next.js web application that provides:
 - Python 3.6+
 - Git (optional)
 - Required Python packages (see requirements.txt)
-- Ollama (optional, for AI features)
+- Ollama (optional, for AI features, almost any model will do)
 
 ### Frontend
 - Node.js 18+
