@@ -132,9 +132,9 @@ class DependencyAnalyzer:
     def _get_node_style(self, file_path: str) -> str:
         """Get Mermaid node style based on file type."""
         if file_path.lower().endswith('.py'):
-            return ':::python'
+            return 'class:python'
         elif file_path.lower().endswith('.lua'):
-            return ':::lua'
+            return 'class:lua'
         return ''
 
     def analyze_python_imports(self, file_path: str) -> List[str]:
@@ -391,8 +391,8 @@ class DependencyVisualizer:
         mermaid = f"graph {self.analyzer.diagram_direction}\n"
         
         # Add style definitions
-        mermaid += "    classDef python fill:#2b5b84,stroke:#1a365d,color:#fff\n"
-        mermaid += "    classDef lua fill:#000080,stroke:#000066,color:#fff\n"
+        mermaid += "    classDef python stroke:#1a365d,fill:#2b5b84,color:#fff\n"
+        mermaid += "    classDef lua stroke:#000066,fill:#000080,color:#fff\n"
 
         # Add nodes
         for file_path in dependencies.keys():
@@ -415,8 +415,8 @@ class DependencyVisualizer:
         mermaid = f"graph {self.analyzer.diagram_direction}\n"
         
         # Add style definitions
-        mermaid += "    classDef python fill:#2b5b84,stroke:#1a365d,color:#fff\n"
-        mermaid += "    classDef lua fill:#000080,stroke:#000066,color:#fff\n"
+        mermaid += "    classDef python stroke:#1a365d,fill:#2b5b84,color:#fff\n"
+        mermaid += "    classDef lua stroke:#000066,fill:#000080,color:#fff\n"
 
         # Track directories
         directories = set()
