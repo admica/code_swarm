@@ -984,7 +984,7 @@ async def websocket_logs(websocket: WebSocket):
                     continue
                 except PermissionError:
                     logger.error(f"Permission denied reading log file: {file_path}")
-                    await asyncio.sleep(5)  # Longer backoff for permission issues
+                    await asyncio.sleep(3)  # Longer backoff for permission issues
                     continue
                 except Exception as e:
                     logger.error(f"Error tailing log {file_path}: {e}")
@@ -1039,12 +1039,12 @@ async def websocket_logs(websocket: WebSocket):
         logger.error(f"Unexpected error in websocket handler: {e}")
     finally:
         is_connected = False
-        
+
         # Clean up all tasks
         for task in tasks:
             if not task.done():
                 task.cancel()
-        
+
         # Wait for all tasks to complete cleanup
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

@@ -51,14 +51,14 @@ def install_frontend_dependencies():
     """Install frontend dependencies."""
     logger.info("Installing frontend dependencies...")
     frontend_dir = Path(__file__).parent / 'frontend'
-    
+
     try:
         # Change to frontend directory
         os.chdir(frontend_dir)
-        
+
         # Install dependencies
         subprocess.run(['npm', 'install'], check=True)
-        
+
         logger.info("Frontend dependencies installed successfully")
         return True
     except subprocess.CalledProcessError as e:
@@ -82,7 +82,7 @@ def main():
     # Check and install frontend dependencies
     if not check_npm():
         sys.exit(1)
-    
+
     if not install_frontend_dependencies():
         sys.exit(1)
 

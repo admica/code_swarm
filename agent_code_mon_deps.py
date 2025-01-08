@@ -38,7 +38,7 @@ class DependencyAnalyzer:
 
     def __init__(self, root_path: str):
         """Initialize the analyzer.
-        
+
         Args:
             root_path: The root directory to analyze
         """
@@ -48,18 +48,18 @@ class DependencyAnalyzer:
         self._cache: Dict[str, List[str]] = {}
         self._dependents: Dict[str, Set[str]] = {}  # Track which files depend on each file
         self.config = config_manager.get_agent_config('code_mon_deps')
-        
+
         # Load configuration with defaults
         self.skip_patterns = self.config.get('ignore_patterns', 'venv/*,__pycache__/*,.git/*').split(',')
         self.group_by_directory = self.config.get('group_by_directory', True)
         self.diagram_direction = self.config.get('diagram_direction', 'LR')
         self.enable_ai_analysis = self.config.get('enable_ai_analysis', True)
-        
+
         # Analysis tuning parameters
         self.min_coupling_threshold = self.config.get('min_coupling_threshold', 9)  # Minimum number of dependencies to flag
         self.std_dev_multiplier = self.config.get('std_dev_multiplier', 2.1)  # How many standard deviations above mean to flag
         self.max_depth = self.config.get('max_depth', DEFAULT_MAX_DEPTH)  # Maximum depth for recursive dependency analysis
-        
+
         # Cache and update behavior
         self.cache_enabled = self.config.get('cache_enabled', True)  # Whether to use caching
         self.partial_invalidation = self.config.get('partial_invalidation', True)  # Whether to use partial cache invalidation
@@ -72,11 +72,11 @@ class DependencyAnalyzer:
     def invalidate_file(self, file_path: str) -> None:
         """Invalidate a file and anything that depends on it (recursively)."""
         self.logger.debug(f"Invalidating cache for {file_path}")
-        
+
         # Keep track of all files we need to invalidate
         to_invalidate = set()
         to_process = {file_path}
-        
+
         # Find all files that depend on this one (recursively)
         while to_process:
             current = to_process.pop()
@@ -85,12 +85,12 @@ class DependencyAnalyzer:
                 # Add all files that depend on this one
                 dependents = self._dependents.get(current, set())
                 to_process.update(dependents)
-        
+
         # Remove all affected files from cache
         for invalid_file in to_invalidate:
             self._cache.pop(invalid_file, None)
             self._dependents.pop(invalid_file, None)
-        
+
         self.logger.debug(f"Invalidated {len(to_invalidate)} files")
 
     def should_skip_file(self, file_path: str) -> bool:
@@ -118,10 +118,10 @@ class DependencyAnalyzer:
 
     def get_module_name(self, file_path: str) -> str:
         """Get module name from file path.
-        
+
         Args:
             file_path: Absolute path to file
-            
+
         Returns:
             Module name
         """
@@ -132,17 +132,17 @@ class DependencyAnalyzer:
     def _get_node_style(self, file_path: str) -> str:
         """Get Mermaid node style based on file type."""
         if file_path.lower().endswith('.py'):
-            return 'class:python'
+            return ' class:python'  # Space before class is important
         elif file_path.lower().endswith('.lua'):
-            return 'class:lua'
+            return ' class:lua'  # Space before class is important
         return ''
 
     def analyze_python_imports(self, file_path: str) -> List[str]:
         """Analyze Python imports in a file.
-        
+
         Args:
             file_path: Path to Python file
-            
+
         Returns:
             List of absolute paths to imported files
         """
@@ -180,10 +180,10 @@ class DependencyAnalyzer:
 
     def analyze_lua_requires(self, file_path: str) -> List[str]:
         """Analyze Lua requires in a file.
-        
+
         Args:
             file_path: Path to Lua file
-            
+
         Returns:
             List of absolute paths to required files
         """
@@ -222,7 +222,7 @@ class DependencyAnalyzer:
     def analyze_file(self, file_path: str) -> List[str]:
         """Analyze dependencies in a file with caching."""
         rel_path = os.path.relpath(file_path, self.root_path)
-        
+
         if file_path in self._cache:
             self.logger.debug(f"Cache hit for {rel_path}")
             return self._cache[file_path]
@@ -242,7 +242,7 @@ class DependencyAnalyzer:
         if file_path in self._dependents:
             old_deps = self._dependents.pop(file_path)
             self.logger.debug(f"Cleared {len(old_deps)} old dependencies for {rel_path}")
-        
+
         # Update cache and track new dependents
         self._cache[file_path] = deps
         for dep in deps:
@@ -259,7 +259,7 @@ class DependencyAnalyzer:
         dependencies = {}
         source_files = self.get_all_source_files()
         self.logger.info(f"Found {len(source_files)} source files to analyze")
-        
+
         for file_path in source_files:
             rel_path = os.path.relpath(file_path, self.root_path)
             if file_path not in self._cache:
@@ -272,7 +272,7 @@ class DependencyAnalyzer:
                 self.logger.debug(f"Using cached dependencies for {rel_path}")
                 deps = self._cache[file_path]
             dependencies[file_path] = deps
-        
+
         self.logger.info(f"Completed analysis of {len(dependencies)} files")
         return dependencies
 
@@ -281,7 +281,7 @@ class DependencyMonitor:
 
     def __init__(self, path: str):
         """Initialize the monitor.
-        
+
         Args:
             path: The root directory to monitor.
         """
@@ -290,13 +290,13 @@ class DependencyMonitor:
         self.file_monitor = FileMonitor('code_mon_deps', self.handle_file_change)
         self.queue = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
-        
+
         # Load configuration
         self.config = config_manager.get_agent_config('code_mon_deps')
         self._update_delay = self.config.get('update_delay', UPDATE_DELAY)
         self._batch_window = self.config.get('batch_window', 2.0)  # Time window to batch changes
         self._max_queue_size = self.config.get('max_queue_size', 100)  # Maximum number of pending changes
-        
+
         self._last_update = 0
         self._cache_lock = asyncio.Lock()
         logger.info("Dependency monitor initialized with update delay: %s", self._update_delay)
@@ -307,7 +307,7 @@ class DependencyMonitor:
             file_lower = file_path.lower()
             if not file_lower.endswith(('.py', '.lua')):
                 return
-                
+
             logger.info(f"Detected modification to {file_path}")
             asyncio.create_task(self.queue.put(file_path))
         except Exception as e:
@@ -318,13 +318,13 @@ class DependencyMonitor:
         while True:
             try:
                 file_path = await self.queue.get()
-                
+
                 # Apply debouncing
                 now = time.time()
                 if now - self._last_update < self._update_delay:
                     await asyncio.sleep(self._update_delay)
                 self._last_update = now
-                
+
                 try:
                     # Use lock to protect cache and visualization operations
                     async with self._cache_lock:
@@ -335,7 +335,7 @@ class DependencyMonitor:
                     logger.error(f"Error updating visualization for {file_path}: {str(e)}", exc_info=True)
                 finally:
                     self.queue.task_done()
-                    
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -366,7 +366,7 @@ class DependencyVisualizer:
 
     def __init__(self, analyzer: DependencyAnalyzer):
         """Initialize the visualizer.
-        
+
         Args:
             analyzer: The dependency analyzer to use
         """
@@ -375,10 +375,10 @@ class DependencyVisualizer:
 
     def generate_mermaid(self, dependencies: Dict[str, List[str]]) -> str:
         """Generate Mermaid diagram from dependencies.
-        
+
         Args:
             dependencies: Dictionary mapping files to their dependencies
-            
+
         Returns:
             Mermaid diagram markup
         """
@@ -388,35 +388,35 @@ class DependencyVisualizer:
 
     def _generate_flat_mermaid(self, dependencies: Dict[str, List[str]]) -> str:
         """Generate flat Mermaid diagram."""
-        mermaid = f"graph {self.analyzer.diagram_direction}\n"
-        
+        mermaid = ["graph " + self.analyzer.diagram_direction]
+
         # Add style definitions
-        mermaid += "    classDef python stroke:#1a365d,fill:#2b5b84,color:#fff\n"
-        mermaid += "    classDef lua stroke:#000066,fill:#000080,color:#fff\n"
+        mermaid.append("    classDef python fill:#2b5b84,stroke:#1a365d,color:#fff")
+        mermaid.append("    classDef lua fill:#000080,stroke:#000066,color:#fff")
 
         # Add nodes
         for file_path in dependencies.keys():
             node_id = self.analyzer.get_module_name(file_path).replace('.', '_')
             node_label = os.path.basename(file_path)
             style = self.analyzer._get_node_style(file_path)
-            mermaid += f"    {node_id}[{node_label}] {style}\n"
+            mermaid.append(f"    {node_id}[{node_label}]{style}")
 
         # Add relationships
         for file_path, deps in dependencies.items():
             source_id = self.analyzer.get_module_name(file_path).replace('.', '_')
             for dep in deps:
                 target_id = self.analyzer.get_module_name(dep).replace('.', '_')
-                mermaid += f"    {source_id} --> {target_id}\n"
+                mermaid.append(f"    {source_id} --> {target_id}")
 
-        return mermaid
+        return "\n".join(mermaid)
 
     def _generate_grouped_mermaid(self, dependencies: Dict[str, List[str]]) -> str:
         """Generate Mermaid diagram with directory grouping."""
-        mermaid = f"graph {self.analyzer.diagram_direction}\n"
-        
+        mermaid = ["graph " + self.analyzer.diagram_direction]
+
         # Add style definitions
-        mermaid += "    classDef python stroke:#1a365d,fill:#2b5b84,color:#fff\n"
-        mermaid += "    classDef lua stroke:#000066,fill:#000080,color:#fff\n"
+        mermaid.append("    classDef python fill:#2b5b84,stroke:#1a365d,color:#fff")
+        mermaid.append("    classDef lua fill:#000080,stroke:#000066,color:#fff")
 
         # Track directories
         directories = set()
@@ -429,7 +429,7 @@ class DependencyVisualizer:
         # Add subgraphs for directories
         for directory in sorted(directories):
             dir_id = directory.replace(os.sep, '_')
-            mermaid += f"    subgraph {dir_id}[{directory}]\n"
+            mermaid.append(f"    subgraph {dir_id}[{directory}]")
 
             # Add nodes for files in this directory
             for file_path in dependencies.keys():
@@ -438,9 +438,9 @@ class DependencyVisualizer:
                     node_id = self.analyzer.get_module_name(file_path).replace('.', '_')
                     node_label = os.path.basename(file_path)
                     style = self.analyzer._get_node_style(file_path)
-                    mermaid += f"        {node_id}[{node_label}] {style}\n"
+                    mermaid.append(f"        {node_id}[{node_label}]{style}")
 
-            mermaid += "    end\n"
+            mermaid.append("    end")
 
         # Add nodes for files in root
         for file_path in dependencies.keys():
@@ -449,16 +449,16 @@ class DependencyVisualizer:
                 node_id = self.analyzer.get_module_name(file_path).replace('.', '_')
                 node_label = os.path.basename(file_path)
                 style = self.analyzer._get_node_style(file_path)
-                mermaid += f"    {node_id}[{node_label}] {style}\n"
+                mermaid.append(f"    {node_id}[{node_label}]{style}")
 
         # Add relationships
         for file_path, deps in dependencies.items():
             source_id = self.analyzer.get_module_name(file_path).replace('.', '_')
             for dep in deps:
                 target_id = self.analyzer.get_module_name(dep).replace('.', '_')
-                mermaid += f"    {source_id} --> {target_id}\n"
+                mermaid.append(f"    {source_id} --> {target_id}")
 
-        return mermaid
+        return "\n".join(mermaid)
 
     async def get_ai_insights(self, dependencies: Dict[str, List[str]]) -> Optional[str]:
         """Get AI insights about the dependency structure."""
@@ -468,7 +468,7 @@ class DependencyVisualizer:
         try:
             deps_counts = [len(deps) for deps in dependencies.values()]
             avg_deps = sum(deps_counts) / len(dependencies) if dependencies else 0
-            
+
             analysis = {
                 "total_files": len(dependencies),
                 "files_with_deps": len([f for f in dependencies.values() if f]),
@@ -494,7 +494,7 @@ class DependencyVisualizer:
                 std_dev = (sum((x - avg_deps) ** 2 for x in deps_counts) / len(deps_counts)) ** 0.5
                 threshold = avg_deps + (self.analyzer.std_dev_multiplier * std_dev)
                 threshold = max(threshold, self.analyzer.min_coupling_threshold)
-                
+
                 for file_path, deps in dependencies.items():
                     if len(deps) >= threshold:
                         analysis["highly_coupled"].append({
@@ -539,7 +539,7 @@ Keep the response under 300 words and maintain a positive constructive tone."""
         """Update dependency visualization files."""
         try:
             self.logger.info("Starting dependency visualization update")
-            
+
             # Analyze project dependencies
             self.logger.info("Analyzing project dependencies...")
             dependencies = self.analyzer.analyze_project()
@@ -563,10 +563,10 @@ Keep the response under 300 words and maintain a positive constructive tone."""
             # Create visualization file
             vis_path = os.path.join(self.analyzer.root_path, 'dependency_graph.md')
             self.logger.info(f"Writing visualization to {vis_path}")
-            
+
             with open(vis_path, 'w') as f:
                 f.write("# Project Dependency Graph\n\n")
-                
+
                 f.write("## Visualization\n\n")
                 f.write("```mermaid\n")
                 f.write(mermaid)
@@ -576,7 +576,7 @@ Keep the response under 300 words and maintain a positive constructive tone."""
                     f.write("## AI Analysis\n\n")
                     f.write(ai_insights)
                     f.write("\n\n")
-                
+
                 # Add dependency details
                 f.write("## Detailed Dependencies\n\n")
                 for file_path, deps in dependencies.items():
@@ -599,14 +599,14 @@ Keep the response under 300 words and maintain a positive constructive tone."""
 
 async def main(path: str) -> None:
     """Main function to run the dependency graph agent.
-    
+
     Args:
         path: The root directory to monitor
     """
     try:
         # Initialize monitor
         monitor = DependencyMonitor(path)
-        
+
         # Generate initial visualization before starting monitor
         vis_path = os.path.join(path, 'dependency_graph.md')
         if not os.path.exists(vis_path):
@@ -625,10 +625,10 @@ async def main(path: str) -> None:
                 raise
         else:
             logger.info(f"Found existing dependency graph at {vis_path}")
-        
+
         # Start monitoring
         monitor.start(path)
-        
+
         try:
             # Keep running until interrupted
             while True:
@@ -637,7 +637,7 @@ async def main(path: str) -> None:
             logger.info("Dependency monitor shutting down...")
             monitor.stop()
             raise
-            
+
     except Exception as e:
         logger.error(f"Error in dependency monitor: {str(e)}", exc_info=True)
         raise

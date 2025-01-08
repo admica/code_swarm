@@ -45,11 +45,75 @@ class ServiceManager:
             time.sleep(1)
         return False
 
+    def _kill_process_on_port(self, port: int) -> bool:
+        """Kill any process running on the specified port.
+
+        Args:
+            port: Port number to check and kill process on
+
+        Returns:
+            bool: True if process was killed or no process found, False if kill failed
+        """
+        try:
+            for conn in psutil.net_connections(kind='inet'):  # Explicitly check internet sockets
+                if conn.laddr.port == port and conn.status == 'LISTEN':  # Only kill listening processes
+                    try:
+                        process = psutil.Process(conn.pid)
+                        logger.info(f"Found existing process on port {port} (PID: {conn.pid})")
+
+                        # Try graceful shutdown first
+                        process.terminate()
+                        try:
+                            process.wait(timeout=3)  # Wait up to 3 seconds for graceful shutdown
+                        except psutil.TimeoutExpired:
+                            logger.warning(f"Process {conn.pid} did not terminate gracefully, forcing kill")
+                            process.kill()  # Force kill
+                            process.wait(timeout=2)  # Wait for kill to complete
+
+                        # Verify port is actually released
+                        time.sleep(0.5)  # Short wait for OS to release port
+                        if not self._is_port_in_use(port):
+                            logger.info(f"Successfully killed process on port {port}")
+                            return True
+                        else:
+                            logger.error(f"Port {port} still in use after killing process")
+                            return False
+
+                    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                        logger.error(f"Error accessing process on port {port}: {e}")
+                        return False
+
+            logger.debug(f"No listening process found on port {port}")
+            return True  # No process to kill is still a success
+
+        except Exception as e:
+            logger.error(f"Unexpected error killing process on port {port}: {e}")
+            return False
+
+    def _cleanup_ports(self) -> None:
+        """Clean up any processes running on required ports.
+
+        Attempts to kill processes on both frontend and backend ports.
+        Logs results but doesn't raise exceptions.
+        """
+        logger.info("Cleaning up existing processes on required ports...")
+
+        results = {
+            'backend': self._kill_process_on_port(8000),
+            'frontend': self._kill_process_on_port(3000)
+        }
+
+        if all(results.values()):
+            logger.info("Port cleanup completed successfully")
+        else:
+            failed_ports = [name for name, success in results.items() if not success]
+            logger.warning(f"Port cleanup failed for: {', '.join(failed_ports)}")
+
     def start_backend(self) -> bool:
         """Start the backend service."""
         try:
             logger.info("Starting backend service...")
-            
+
             # Check if backend is already running
             if self._is_port_in_use(8000):
                 logger.warning("Backend port 8000 is already in use. Is the service already running?")
@@ -79,7 +143,7 @@ class ServiceManager:
         """Start the frontend service."""
         try:
             logger.info("Starting frontend service...")
-            
+
             # Check if frontend is already running
             if self._is_port_in_use(3000):
                 logger.warning("Frontend port 3000 is already in use. Is the service already running?")
@@ -112,43 +176,61 @@ class ServiceManager:
             os.chdir(self.workspace_root)
 
     def stop_services(self) -> None:
-        """Stop all services."""
+        """Stop all services and cleanup processes."""
         logger.info("Stopping services...")
 
         def terminate_process_tree(process: Optional[subprocess.Popen]) -> None:
-            """Terminate a process and all its children."""
+            """Terminate a process and all its children recursively."""
             if not process:
                 return
 
             try:
                 parent = psutil.Process(process.pid)
                 children = parent.children(recursive=True)
-                
+
+                # First attempt graceful termination of children
                 for child in children:
-                    child.terminate()
+                    try:
+                        child.terminate()
+                    except psutil.NoSuchProcess:
+                        continue
+
+                # Then terminate parent
                 parent.terminate()
-                
+
                 # Wait for processes to terminate
-                _, alive = psutil.wait_procs([parent] + children, timeout=3)
-                
-                # Force kill if still alive
+                gone, alive = psutil.wait_procs([parent] + children, timeout=3)
+
+                # Force kill any remaining processes
                 for p in alive:
-                    p.kill()
-                    
+                    try:
+                        logger.warning(f"Force killing process {p.pid}")
+                        p.kill()
+                        p.wait(timeout=2)
+                    except (psutil.NoSuchProcess, psutil.TimeoutExpired) as e:
+                        logger.error(f"Error force killing process {p.pid}: {e}")
+
             except psutil.NoSuchProcess:
                 pass
             except Exception as e:
-                logger.error(f"Error terminating process: {e}")
+                logger.error(f"Error in process tree termination: {e}")
 
-        # Stop frontend
+        # Stop services in reverse order
         if self.frontend_process:
+            logger.info("Stopping frontend service...")
             terminate_process_tree(self.frontend_process)
             self.frontend_process = None
 
-        # Stop backend
         if self.backend_process:
+            logger.info("Stopping backend service...")
             terminate_process_tree(self.backend_process)
             self.backend_process = None
+
+        # Final verification of port cleanup
+        time.sleep(1)  # Brief wait for processes to fully cleanup
+        if self._is_port_in_use(3000) or self._is_port_in_use(8000):
+            logger.warning("Some ports still in use after service shutdown")
+            self._cleanup_ports()  # Final cleanup attempt
 
         logger.info("All services stopped")
 
@@ -176,7 +258,7 @@ class ServiceManager:
                 check=True,
                 capture_output=True
             )
-            
+
             return True
 
         except subprocess.CalledProcessError:
@@ -216,7 +298,7 @@ def main():
             logger.error("Failed to start frontend service")
             manager.stop_services()
             sys.exit(1)
-        
+
         logger.info("Code Swarm is running!")
         logger.info("Frontend: http://localhost:3000")
         logger.info("Backend: http://localhost:8000")
