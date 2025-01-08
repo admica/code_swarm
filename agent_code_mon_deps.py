@@ -26,7 +26,7 @@ logger = AgentLogger('code_mon_deps')
 
 # Constants
 UPDATE_DELAY = 3.0  # seconds
-DEFAULT_MAX_DEPTH = 5
+DEFAULT_MAX_DEPTH = 8
 REQUIRE_PATTERNS = [
     r'''(?:require|dofile|loadfile)\s*[\(\["']([^"\'\)]+)["'\)\]]''',  # Simple requires
     r'''(?:require|dofile|loadfile)\s*\(?([^"\'\)]+\.\.[\s\n]*[^"\'\)]+)\)?''',  # Concatenated
@@ -56,8 +56,8 @@ class DependencyAnalyzer:
         self.enable_ai_analysis = self.config.get('enable_ai_analysis', True)
         
         # Analysis tuning parameters
-        self.min_coupling_threshold = self.config.get('min_coupling_threshold', 8)  # Minimum number of dependencies to flag
-        self.std_dev_multiplier = self.config.get('std_dev_multiplier', 2.0)  # How many standard deviations above mean to flag
+        self.min_coupling_threshold = self.config.get('min_coupling_threshold', 9)  # Minimum number of dependencies to flag
+        self.std_dev_multiplier = self.config.get('std_dev_multiplier', 2.1)  # How many standard deviations above mean to flag
         self.max_depth = self.config.get('max_depth', DEFAULT_MAX_DEPTH)  # Maximum depth for recursive dependency analysis
         
         # Cache and update behavior
@@ -294,7 +294,7 @@ class DependencyMonitor:
         # Load configuration
         self.config = config_manager.get_agent_config('code_mon_deps')
         self._update_delay = self.config.get('update_delay', UPDATE_DELAY)
-        self._batch_window = self.config.get('batch_window', 1.0)  # Time window to batch changes
+        self._batch_window = self.config.get('batch_window', 2.0)  # Time window to batch changes
         self._max_queue_size = self.config.get('max_queue_size', 100)  # Maximum number of pending changes
         
         self._last_update = 0
@@ -521,11 +521,11 @@ Please provide:
 1. A balanced assessment of the project's modularity
 2. Note any potential areas for improvement, but consider that some coupling is normal and necessary
 3. If suggesting improvements, focus on significant patterns rather than isolated cases
-Keep the response under 220 words and maintain a constructive tone."""
+Keep the response under 300 words and maintain a positive constructive tone."""
 
             result = await self.analyzer.llm_client.generate(
                 prompt=prompt,
-                max_tokens=1100,
+                max_tokens=1400,
                 temperature=0.6
             )
 

@@ -57,7 +57,7 @@ export function LLMMonitoring() {
   // Render a circular gauge
   const CircularGauge = ({ value, max, label }: { value: number; max: number; label: string }) => {
     const percentage = (value / max) * 100;
-    const radius = 40;
+    const radius = 52;
     const circumference = 2 * Math.PI * radius;
     const offset = circumference - (percentage / 100) * circumference;
 
