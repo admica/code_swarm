@@ -52,7 +52,7 @@ class DependencyAnalyzer:
         # Load configuration with defaults
         self.skip_patterns = self.config.get('ignore_patterns', 'venv/*,__pycache__/*,.git/*').split(',')
         self.group_by_directory = self.config.get('group_by_directory', True)
-        self.diagram_direction = self.config.get('diagram_direction', 'LR')
+        self.diagram_direction = self.config.get('diagram_direction', 'TB')  # Default to top-bottom
         self.enable_ai_analysis = self.config.get('enable_ai_analysis', True)
 
         # Analysis tuning parameters
@@ -132,9 +132,9 @@ class DependencyAnalyzer:
     def _get_node_style(self, file_path: str) -> str:
         """Get Mermaid node style based on file type."""
         if file_path.lower().endswith('.py'):
-            return ' class:python'  # Space before class is important
+            return ':::python'  # Using ::: for class assignment
         elif file_path.lower().endswith('.lua'):
-            return ' class:lua'  # Space before class is important
+            return ':::lua'  # Using ::: for class assignment
         return ''
 
     def analyze_python_imports(self, file_path: str) -> List[str]:
@@ -391,8 +391,8 @@ class DependencyVisualizer:
         mermaid = ["graph " + self.analyzer.diagram_direction]
 
         # Add style definitions
-        mermaid.append("    classDef python fill:#2b5b84,stroke:#1a365d,color:#fff")
-        mermaid.append("    classDef lua fill:#000080,stroke:#000066,color:#fff")
+        mermaid.append("    classDef python fill:#2b5b84,stroke:#1a365d,color:#fff;")
+        mermaid.append("    classDef lua fill:#000080,stroke:#000066,color:#fff;")
 
         # Add nodes
         for file_path in dependencies.keys():
@@ -415,8 +415,8 @@ class DependencyVisualizer:
         mermaid = ["graph " + self.analyzer.diagram_direction]
 
         # Add style definitions
-        mermaid.append("    classDef python fill:#2b5b84,stroke:#1a365d,color:#fff")
-        mermaid.append("    classDef lua fill:#000080,stroke:#000066,color:#fff")
+        mermaid.append("    classDef python fill:#2b5b84,stroke:#1a365d,color:#fff;")
+        mermaid.append("    classDef lua fill:#000080,stroke:#000066,color:#fff;")
 
         # Track directories
         directories = set()
