@@ -6,11 +6,40 @@ AI Agents that assist with programming tasks, with a modern web interface for mo
 
 ## Overview
 
-Code Swarm is a suite of AI-powered programming assistants that help maintain and document your Python codebase. It consists of:
+Code Swarm is a suite of AI-powered programming assistants that help maintain and document Python and Lua codebases.
 
-1. A set of specialized Python agents for different tasks
+It consists of:
+1. A set of specialized agents for different coding tasks
 2. A central controller that manages the agents
 3. A modern web interface for monitoring and control
+
+## Quick Start
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/admica/code_swarm.git
+   cd code_swarm
+   ```
+
+2. Run the setup script to install all dependencies:
+   ```bash
+   python setup.py
+   ```
+
+3. Start the application:
+   ```bash
+   python run.py
+   ```
+
+4. Open http://localhost:3000 in your browser
+
+The application will automatically:
+- Start the backend server on port 8000
+- Start the frontend development server on port 3000
+- Set up WebSocket connections for real-time logging
+- Initialize all required services
+
+To stop the application, press Ctrl+C in the terminal where run.py is running.
 
 ## Components
 
@@ -73,34 +102,6 @@ A Next.js web application that provides:
 - Node.js 18+
 - npm or yarn
 - Modern web browser
-
-## Quick Start
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/code_swarm.git
-   cd code_swarm
-   ```
-
-2. Run the setup script to install all dependencies:
-   ```bash
-   python setup.py
-   ```
-
-3. Start the application:
-   ```bash
-   python run.py
-   ```
-
-4. Open http://localhost:3000 in your browser
-
-The application will automatically:
-- Start the backend server on port 8000
-- Start the frontend development server on port 3000
-- Set up WebSocket connections for real-time logging
-- Initialize all required services
-
-To stop the application, press Ctrl+C in the terminal where run.py is running.
 
 ## Configuration
 
