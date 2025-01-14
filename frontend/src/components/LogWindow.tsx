@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { agentsApi } from '../lib/api';
 import { ChangelogEntry, ReadmeUpdate, DependencyGraph, AgentState } from '../types/agents';
+import { logsWebSocket, useWebSocket } from '../lib/websocket';
 
 interface LogWindowProps {
   agents: string[];
@@ -20,18 +21,11 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
   const [logs, setLogs] = useState<ActivityMessage[]>([]);
   const [autoScroll, setAutoScroll] = useState(true);
   const [selectedAgent, setSelectedAgent] = useState<string | 'all'>('all');
-  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected');
-  const [connectionAttempts, setConnectionAttempts] = useState(0);
+  const wsStatus = useWebSocket(logsWebSocket);
   const logContainerRef = useRef<HTMLDivElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const autoScrollAnchorRef = useRef<HTMLDivElement>(null);
 
   const MAX_LOGS = 1000; // Maximum number of logs to keep in memory
-  const MAX_RETRY_ATTEMPTS = 5;
-  const RETRY_DELAY = 2000; // 2 seconds initial delay
-  const MAX_RETRY_DELAY = 30000; // 30 seconds max delay
-  const RETRY_BACKOFF = 1.5; // Exponential backoff multiplier
 
   // Add log with rate limiting
   const addLog = useCallback((newLog: ActivityMessage) => {
@@ -46,138 +40,6 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
       autoScrollAnchorRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [autoScroll, MAX_LOGS]);
-
-  const connectWebSocket = useCallback(() => {
-    try {
-      // Clear any existing connection and timeout
-      if (wsRef.current) {
-        wsRef.current.close(1000, 'Normal closure');  // Use normal closure code
-        wsRef.current = null;
-      }
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = undefined;
-      }
-
-      setWsStatus('connecting');
-
-      const ws = new WebSocket('ws://localhost:8000/ws/logs');
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setWsStatus('connected');
-        setConnectionAttempts(0); // Reset attempts on successful connection
-        addLog({
-          timestamp: new Date().toISOString(),
-          type: 'status',
-          agent: 'system',
-          content: 'Connected to log stream',
-          level: 'info'
-        });
-      };
-
-      ws.onmessage = (event) => {
-        const log = parseBackendLog(event.data);
-        if (log) {
-          addLog(log);
-        }
-      };
-
-      ws.onclose = (event) => {
-        // Clear existing connection
-        wsRef.current = null;
-        
-        // Don't increment attempts if it was a normal closure
-        const wasNormalClosure = event.code === 1000 || event.code === 1001;
-        
-        if (wasNormalClosure) {
-          setWsStatus('disconnected');
-          return;  // Don't attempt to reconnect on normal closure
-        }
-
-        // Only log abnormal closures
-        addLog({
-          timestamp: new Date().toISOString(),
-          type: 'status',
-          agent: 'system',
-          content: `Disconnected from log stream (code: ${event.code})${event.reason ? ': ' + event.reason : ''}`,
-          level: 'warning'
-        });
-
-        setWsStatus('disconnected');
-
-        // Attempt to reconnect if not at max attempts
-        if (connectionAttempts < MAX_RETRY_ATTEMPTS) {
-          const nextAttempt = connectionAttempts + 1;
-          const currentDelay = Math.min(
-            RETRY_DELAY * Math.pow(RETRY_BACKOFF, connectionAttempts),
-            MAX_RETRY_DELAY
-          );
-
-          addLog({
-            timestamp: new Date().toISOString(),
-            type: 'status',
-            agent: 'system',
-            content: `Reconnecting in ${Math.round(currentDelay/1000)}s (attempt ${nextAttempt}/${MAX_RETRY_ATTEMPTS})`,
-            level: 'info'
-          });
-
-          // Schedule reconnection
-          reconnectTimeoutRef.current = setTimeout(() => {
-            setConnectionAttempts(nextAttempt);
-            connectWebSocket();
-          }, currentDelay);
-        } else {
-          setWsStatus('error');
-          addLog({
-            timestamp: new Date().toISOString(),
-            type: 'status',
-            agent: 'system',
-            content: 'Maximum reconnection attempts reached. Please refresh the page.',
-            level: 'error'
-          });
-        }
-      };
-
-      ws.onerror = (error) => {
-        // Don't log WebSocket errors as they're followed by onclose events
-        // Just update the status
-        setWsStatus('error');
-      };
-    } catch (error) {
-      console.error('Error connecting to WebSocket:', error);
-      setWsStatus('error');
-      addLog({
-        timestamp: new Date().toISOString(),
-        type: 'status',
-        agent: 'system',
-        content: `Failed to connect: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        level: 'error'
-      });
-    }
-  }, [connectionAttempts, addLog]);
-
-  // Initial connection
-  useEffect(() => {
-    connectWebSocket();
-
-    // Cleanup on unmount
-    return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-    };
-  }, [connectWebSocket]);
-
-  // Manual reconnect handler
-  const handleReconnect = useCallback(() => {
-    setConnectionAttempts(0); // Reset attempts
-    connectWebSocket();
-  }, [connectWebSocket]);
 
   // Convert backend log message to ActivityMessage
   const parseBackendLog = (log: string): ActivityMessage | null => {
@@ -216,8 +78,49 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
     }
   };
 
+  // Handle incoming WebSocket messages
+  useEffect(() => {
+    const handleMessage = (data: string) => {
+      const log = parseBackendLog(data);
+      if (log) {
+        addLog(log);
+      }
+    };
+
+    logsWebSocket.on('message', handleMessage);
+
+    return () => {
+      logsWebSocket.removeListener('message', handleMessage);
+    };
+  }, [addLog]);
+
+  // Add connection status messages
+  useEffect(() => {
+    if (wsStatus === 'connected') {
+      addLog({
+        timestamp: new Date().toISOString(),
+        type: 'status',
+        agent: 'system',
+        content: 'Connected to log stream',
+        level: 'info'
+      });
+    } else if (wsStatus === 'error') {
+      addLog({
+        timestamp: new Date().toISOString(),
+        type: 'status',
+        agent: 'system',
+        content: 'Connection error. Click "Retry Connection" to reconnect.',
+        level: 'error'
+      });
+    }
+  }, [wsStatus, addLog]);
+
   const handleClear = () => {
     setLogs([]);
+  };
+
+  const handleReconnect = () => {
+    logsWebSocket.connect();
   };
 
   const filteredLogs = selectedAgent === 'all'

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!./venv/bin/python3
 # PATH: ./agent_code_mon_deps.py
 """
 Agent that analyzes Python and Lua file dependencies and generates Mermaid diagrams.
@@ -344,10 +344,10 @@ class DependencyMonitor(BaseAgent):
                                 action="analyzing_dependencies",
                                 file_path=file_path
                             )
-                            
+
                             self.analyzer.invalidate_file(file_path)  # Only invalidate affected files
                             await self.visualizer.update_visualization()
-                            
+
                             # Send analysis complete message
                             await self.send_activity(
                                 action="analysis_complete",
@@ -372,13 +372,13 @@ class DependencyMonitor(BaseAgent):
         """Start monitoring."""
         if not self.running:
             self.running = True
-            
+
         if not self._task or self._task.done():
             self._task = asyncio.create_task(self.start_processing())
-            
+
         # Start file monitoring
         self.file_monitor.start(path)
-        
+
         # Start the BaseAgent run loop and keep running
         await self.run()  # This will keep running until self.running is False
 

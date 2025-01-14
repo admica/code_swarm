@@ -148,7 +148,7 @@ class ServiceManager:
 
             # Create process with non-blocking pipes
             output_queue = Queue()
-            
+
             def reader(pipe, queue):
                 try:
                     with pipe:
@@ -156,7 +156,7 @@ class ServiceManager:
                             queue.put(('out' if pipe == process.stdout else 'err', line.strip()))
                 finally:
                     queue.put(None)
-            
+
             # Start the backend process
             process = subprocess.Popen(
                 [sys.executable, str(self.backend_script)],
@@ -167,17 +167,17 @@ class ServiceManager:
                 universal_newlines=True,
                 preexec_fn=os.setsid if os.name != 'nt' else None  # Create new process group on Unix
             )
-            
+
             # Start output reader threads
             threading.Thread(target=reader, args=[process.stdout, output_queue], daemon=True).start()
             threading.Thread(target=reader, args=[process.stderr, output_queue], daemon=True).start()
-            
+
             self.backend_process = process
-            
+
             # Wait for the backend to start
             start_time = time.time()
             readers_alive = 2  # Number of reader threads
-            
+
             while time.time() - start_time < 30:  # 30 second timeout
                 # Check if process has exited
                 if process.poll() is not None:
@@ -192,14 +192,14 @@ class ServiceManager:
                             logger.error(f"Backend {'error' if stream == 'err' else 'output'}: {line}")
                         except Empty:
                             break
-                    
+
                     logger.error("Backend process exited unexpectedly")
                     return False
-                
+
                 # Check for port availability
                 if self._is_port_in_use(8000):
                     logger.info("Backend service started successfully")
-                    
+
                     # Start background thread to handle remaining output
                     def background_reader():
                         while True:
@@ -214,10 +214,10 @@ class ServiceManager:
                                 logger.info(f"Backend {'error' if stream == 'err' else 'output'}: {line}")
                             except Empty:
                                 continue
-                    
+
                     threading.Thread(target=background_reader, daemon=True).start()
                     return True
-                
+
                 # Check for any output
                 try:
                     item = output_queue.get(timeout=0.1)
@@ -228,7 +228,7 @@ class ServiceManager:
                     logger.info(f"Backend {'error' if stream == 'err' else 'output'}: {line}")
                 except Empty:
                     continue
-            
+
             logger.error("Backend failed to start (timeout waiting for port 8000)")
             process.terminate()
             return False
@@ -257,7 +257,7 @@ class ServiceManager:
 
             # Create process with non-blocking pipes
             output_queue = Queue()
-            
+
             def reader(pipe, queue):
                 try:
                     with pipe:
@@ -276,17 +276,17 @@ class ServiceManager:
                 universal_newlines=True,
                 preexec_fn=os.setsid if os.name != 'nt' else None  # Create new process group on Unix
             )
-            
+
             # Start output reader threads
             threading.Thread(target=reader, args=[process.stdout, output_queue], daemon=True).start()
             threading.Thread(target=reader, args=[process.stderr, output_queue], daemon=True).start()
-            
+
             self.frontend_process = process
-            
+
             # Wait for the frontend to start
             start_time = time.time()
             readers_alive = 2  # Number of reader threads
-            
+
             while time.time() - start_time < 30:  # 30 second timeout
                 # Check if process has exited
                 if process.poll() is not None:
@@ -301,14 +301,14 @@ class ServiceManager:
                             logger.error(f"Frontend {'error' if stream == 'err' else 'output'}: {line}")
                         except Empty:
                             break
-                    
+
                     logger.error("Frontend process exited unexpectedly")
                     return False
-                
+
                 # Check for port availability
                 if self._is_port_in_use(3000):
                     logger.info("Frontend service started successfully")
-                    
+
                     # Start background thread to handle remaining output
                     def background_reader():
                         nonlocal readers_alive
@@ -324,10 +324,10 @@ class ServiceManager:
                                 logger.info(f"Frontend {'error' if stream == 'err' else 'output'}: {line}")
                             except Empty:
                                 continue
-                    
+
                     threading.Thread(target=background_reader, daemon=True).start()
                     return True
-                
+
                 # Check for any output
                 try:
                     item = output_queue.get(timeout=0.1)
@@ -338,7 +338,7 @@ class ServiceManager:
                     logger.info(f"Frontend {'error' if stream == 'err' else 'output'}: {line}")
                 except Empty:
                     continue
-            
+
             logger.error("Frontend failed to start (timeout waiting for port 3000)")
             process.terminate()
             return False
