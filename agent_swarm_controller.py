@@ -732,6 +732,11 @@ class AgentMessageManager:
 
     async def connect_frontend(self, websocket: WebSocket):
         """Connect a frontend client."""
+        # Check if this websocket is already connected
+        if websocket in self.frontend_connections:
+            self.logger.warning(f"Frontend {websocket.client} already connected")
+            return
+
         self.frontend_connections.add(websocket)
         self.connection_counts['frontend'] += 1
         self.logger.info(f"Frontend client connected from {websocket.client} (Total frontends: {self.connection_counts['frontend']})")
@@ -745,13 +750,16 @@ class AgentMessageManager:
             await websocket.send_json(initial_message)
         except Exception as e:
             self.logger.error(f"Error sending initial message to frontend {websocket.client}: {e}")
+            await self.disconnect_frontend(websocket)
 
     async def connect_agent(self, websocket: WebSocket, agent_name: str):
         """Connect an agent."""
         if agent_name in self.active_connections:
+            old_ws = self.active_connections[agent_name]
             self.logger.info(f"Closing existing connection for agent: {agent_name}")
             try:
-                await self.active_connections[agent_name].close()
+                await old_ws.close()
+                self.connection_counts['agent'] -= 1
             except Exception as e:
                 self.logger.error(f"Error closing existing connection for agent {agent_name}: {e}")
 
@@ -768,13 +776,19 @@ class AgentMessageManager:
             })
         except Exception as e:
             self.logger.error(f"Error sending connection confirmation to agent {agent_name}: {e}")
+            await self.disconnect_agent(agent_name)
 
     async def disconnect_frontend(self, websocket: WebSocket):
         """Disconnect a frontend client."""
         if websocket in self.frontend_connections:
-            self.frontend_connections.remove(websocket)
-            self.connection_counts['frontend'] -= 1
-            self.logger.info(f"Frontend client disconnected from {websocket.client} (Remaining frontends: {self.connection_counts['frontend']})")
+            try:
+                await websocket.close()
+            except Exception as e:
+                self.logger.error(f"Error closing frontend connection: {e}")
+            finally:
+                self.frontend_connections.remove(websocket)
+                self.connection_counts['frontend'] -= 1
+                self.logger.info(f"Frontend client disconnected from {websocket.client} (Remaining frontends: {self.connection_counts['frontend']})")
 
     async def disconnect_agent(self, agent_name: str):
         """Disconnect an agent."""
@@ -1069,6 +1083,8 @@ async def websocket_logs(websocket: WebSocket):
     """Stream logs from all agents and controller via WebSocket."""
     tasks = []
     is_connected = False
+    logger = logging.getLogger('swarm_controller')
+
     try:
         await websocket.accept()
         is_connected = True
@@ -1153,8 +1169,14 @@ async def websocket_logs(websocket: WebSocket):
 
             logger.info(f"Started {len(tasks)} log tailing tasks")
 
-            # Wait for all tasks to complete
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Wait for all tasks to complete or connection to close
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(websocket.receive_text())] + tasks,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # If we get here, either the connection was closed or a task failed
+            is_connected = False
 
         except Exception as e:
             error_msg = f"Error in log streaming: {e}"
@@ -1201,6 +1223,7 @@ async def websocket_agent(websocket: WebSocket):
     """WebSocket endpoint for agent messages."""
     logger = logging.getLogger('swarm_controller')
     logger.info(f"New WebSocket connection attempt from {websocket.client}")
+    connection_type = None
 
     try:
         # Accept the connection first
@@ -1214,6 +1237,7 @@ async def websocket_agent(websocket: WebSocket):
         if initial_message.get("type") == "frontend_connect":
             # Handle frontend connection
             logger.info("Processing frontend connection")
+            connection_type = "frontend"
             await agent_message_manager.connect_frontend(websocket)
 
             try:
@@ -1245,6 +1269,7 @@ async def websocket_agent(websocket: WebSocket):
                 await websocket.close()
                 return
 
+            connection_type = "agent"
             await agent_message_manager.connect_agent(websocket, agent_name)
 
             try:

@@ -19,10 +19,10 @@ from shared.agent_logger import AgentLogger
 
 class BaseFileHandler(FileSystemEventHandler):
     """Base file handler for watching file changes."""
-    
+
     def __init__(self, callback):
         self.callback = callback
-        
+
     def on_modified(self, event):
         if event.is_directory:
             return
@@ -32,7 +32,7 @@ class BaseFileHandler(FileSystemEventHandler):
 
 class BaseAgent(ABC):
     """Base agent class implementing common functionality."""
-    
+
     def __init__(self, name: str, config_path: str = 'config.ini'):
         self.name = name
         self.config = self._load_config(config_path)
@@ -54,19 +54,19 @@ class BaseAgent(ABC):
         """Load configuration from file."""
         if not os.path.exists(config_path):
             return {}
-            
+
         config = configparser.ConfigParser()
         config.read(config_path)
-        
+
         if self.name not in config:
             return {}
-            
+
         return dict(config[self.name])
 
     async def connect(self):
         """Connect to the controller via WebSocket."""
         success = True
-        
+
         # Connect to logs endpoint
         try:
             self.ws_logs = await websockets.connect(f"ws://localhost:8000/ws/logs")
@@ -78,7 +78,7 @@ class BaseAgent(ABC):
         # Connect to agent endpoint
         try:
             self.ws_agent = await websockets.connect(f"ws://localhost:8000/ws/agent")
-            
+
             # Send initial connect message
             connect_message = {
                 "type": "agent_connect",
@@ -89,7 +89,7 @@ class BaseAgent(ABC):
                 }
             }
             await self.ws_agent.send(json.dumps(connect_message))
-            
+
             # Wait for confirmation
             try:
                 response = await asyncio.wait_for(self.ws_agent.recv(), timeout=5.0)
@@ -106,14 +106,14 @@ class BaseAgent(ABC):
             except Exception as e:
                 self.logger.error(f"Error during handshake: {e}")
                 success = False
-                
+
         except Exception as e:
             self.logger.error(f"Failed to connect to agent message stream: {e}")
             success = False
 
         if not success:
             await self.disconnect()
-            
+
         return success
 
     async def disconnect(self):
@@ -145,7 +145,7 @@ class BaseAgent(ABC):
         delay = self.reconnect_delay * (2 ** (self.reconnect_attempts - 1))  # Exponential backoff
         self.logger.info(f"Attempting reconnection in {delay} seconds (attempt {self.reconnect_attempts})")
         await asyncio.sleep(delay)
-        
+
         return await self.connect()
 
     async def ensure_connection(self):
@@ -221,15 +221,15 @@ class BaseAgent(ABC):
                     if not self.ws_agent:
                         if not await self.reconnect():
                             break
-                    
+
                     # Handle WebSocket messages
                     message = await self.ws_agent.recv()
                     data = json.loads(message)
                     await self.handle_controller_message(data)
-                    
+
                     # Update last activity
                     self.last_activity = datetime.now()
-                    
+
                 except websockets.exceptions.ConnectionClosed:
                     if not await self.reconnect():
                         break
@@ -253,7 +253,7 @@ class BaseAgent(ABC):
         """Log activity and send it through both logging and agent websocket."""
         # Log through regular logging system
         await self.log('info', f"{action}: {file_path}", category='activity')
-        
+
         # Send through agent websocket
         await self.send_activity(action, file_path, details)
 
@@ -280,7 +280,7 @@ class BaseAgent(ABC):
         """Report current status to controller."""
         if not self.ws_agent:
             return
-        
+
         try:
             await self.ws_agent.send(json.dumps({
                 "type": "agent_status",
@@ -300,10 +300,10 @@ class BaseAgent(ABC):
             "message": message,
             "data": kwargs
         }
-        
+
         # Log locally using AgentLogger
         await self.logger.log(level, message, category=category, **kwargs)
-        
+
         # Send to controller
         if self.ws_logs:
             try:
@@ -374,7 +374,7 @@ class BaseAgent(ABC):
 
     async def send_agent_message(self, msg_type: str, data: dict) -> None:
         """Send a typed message to controller.
-        
+
         Args:
             msg_type: The type of message (e.g., 'agent_activity', 'ai_analysis')
             data: The message data matching the type's schema
@@ -382,7 +382,7 @@ class BaseAgent(ABC):
         if not self.ws_agent:
             self.logger.warning(f"Cannot send agent message, no websocket connection: {msg_type}")
             return
-        
+
         try:
             message = {
                 "type": msg_type,
@@ -390,7 +390,7 @@ class BaseAgent(ABC):
                 "agent": self.name,
                 "data": data
             }
-            
+
             self.logger.debug(f"Sending agent message: {msg_type}")
             await self.ws_agent.send(json.dumps(message))
             self.logger.debug(f"Successfully sent agent message: {msg_type}")

@@ -10,6 +10,7 @@ interface WebSocketServiceConfig {
   retryDelay?: number;
   maxRetryDelay?: number;
   retryBackoff?: number;
+  parseAsJson?: boolean;
 }
 
 interface WebSocketServiceInternalConfig {
@@ -20,6 +21,7 @@ interface WebSocketServiceInternalConfig {
   retryDelay: number;
   maxRetryDelay: number;
   retryBackoff: number;
+  parseAsJson: boolean;
 }
 
 class WebSocketService extends EventEmitter {
@@ -28,6 +30,7 @@ class WebSocketService extends EventEmitter {
   private connectionAttempts = 0;
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private readonly config: WebSocketServiceInternalConfig;
+  private isConnecting = false;
 
   constructor(config: WebSocketServiceConfig) {
     super();
@@ -39,12 +42,18 @@ class WebSocketService extends EventEmitter {
       retryDelay: config.retryDelay ?? 2000,
       maxRetryDelay: config.maxRetryDelay ?? 30000,
       retryBackoff: config.retryBackoff ?? 1.5,
+      parseAsJson: config.parseAsJson ?? true
     };
   }
 
   connect() {
+    if (this.isConnecting || this.status === 'connected') {
+      console.log(`Already ${this.isConnecting ? 'connecting to' : 'connected to'} ${this.config.url}`);
+      return;
+    }
+
     try {
-      // Clear any existing connection and timeout
+      this.isConnecting = true;
       this.cleanup();
       
       this.setStatus('connecting');
@@ -57,8 +66,8 @@ class WebSocketService extends EventEmitter {
         console.log(`Connected to ${this.config.url}`);
         this.setStatus('connected');
         this.connectionAttempts = 0;
+        this.isConnecting = false;
 
-        // Send initial message if configured
         if (this.config.initialMessage) {
           ws.send(JSON.stringify(this.config.initialMessage));
         }
@@ -66,7 +75,14 @@ class WebSocketService extends EventEmitter {
 
       ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data);
+          let data = event.data;
+          if (this.config.parseAsJson) {
+            try {
+              data = JSON.parse(event.data);
+            } catch (e) {
+              console.warn('Failed to parse message as JSON, using raw data:', e);
+            }
+          }
           this.emit('message', data);
           if (this.config.onMessage) {
             this.config.onMessage(data);
@@ -78,6 +94,7 @@ class WebSocketService extends EventEmitter {
 
       ws.onclose = (event) => {
         this.ws = null;
+        this.isConnecting = false;
         const wasNormalClosure = event.code === 1000 || event.code === 1001;
 
         if (wasNormalClosure) {
@@ -90,10 +107,12 @@ class WebSocketService extends EventEmitter {
       };
 
       ws.onerror = () => {
+        this.isConnecting = false;
         this.setStatus('error');
       };
     } catch (error) {
       console.error('Error connecting to WebSocket:', error);
+      this.isConnecting = false;
       this.setStatus('error');
       this.handleReconnect();
     }
@@ -155,7 +174,8 @@ class WebSocketService extends EventEmitter {
 
 // Create singleton instances for different WebSocket connections
 export const logsWebSocket = new WebSocketService({
-  url: 'ws://localhost:8000/ws/logs'
+  url: 'ws://localhost:8000/ws/logs',
+  parseAsJson: false  // Log messages are plain text
 });
 
 export const agentWebSocket = new WebSocketService({
@@ -163,7 +183,8 @@ export const agentWebSocket = new WebSocketService({
   initialMessage: {
     type: 'frontend_connect',
     timestamp: new Date().toISOString()
-  }
+  },
+  parseAsJson: true  // Agent messages are JSON
 });
 
 // Custom hook for using WebSocket connections

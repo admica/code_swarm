@@ -25,7 +25,7 @@ class LLMStatus:
 
 class LLMService:
     """Service for managing LLM operations."""
-    
+
     def __init__(self):
         """Initialize the LLM service."""
         self.config = config_manager.get_ollama_config()
@@ -38,16 +38,16 @@ class LLMService:
             'avg_response_time': 0,
             'errors': 0
         }
-    
+
     async def start(self):
         """Start the LLM service."""
         logger.info("Starting LLM service")
         await self._check_health()
-    
+
     async def stop(self):
         """Stop the LLM service."""
         logger.info("Stopping LLM service")
-    
+
     async def _check_health(self) -> bool:
         """Check if Ollama service is healthy."""
         try:
@@ -74,17 +74,17 @@ class LLMService:
             self.status.available = False
             self.status.error = str(e)
             return False
-    
+
     async def get_status(self) -> LLMStatus:
         """Get current LLM service status."""
         if not self.status.last_check or (datetime.now() - self.status.last_check).total_seconds() > 30:
             await self._check_health()
         return self.status
-    
+
     def get_metrics(self) -> Dict[str, Any]:
         """Get LLM usage metrics."""
         return self.metrics
-    
+
     async def generate(
         self,
         prompt: str,
@@ -94,20 +94,20 @@ class LLMService:
         temperature: Optional[float] = None
     ) -> Dict[str, Any]:
         """Generate content using LLM.
-        
+
         Args:
             prompt: The prompt to send to the LLM
             model: Model to use (defaults to configured model)
             agent: Agent making the request
             max_tokens: Maximum tokens to generate
             temperature: Temperature for generation
-            
+
         Returns:
             Dictionary containing the response and metadata
         """
         if not await self._check_health():
             raise LLMError("LLM service is not healthy")
-        
+
         request = {
             "model": model or self.model,
             "prompt": prompt,
@@ -117,11 +117,11 @@ class LLMService:
             request["max_tokens"] = max_tokens
         if temperature is not None:
             request["temperature"] = temperature
-        
+
         try:
             start_time = datetime.now()
             queue_time = 0  # TODO: Implement queue tracking
-            
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self.endpoint}/api/generate",
@@ -131,7 +131,7 @@ class LLMService:
                     if response.status == 200:
                         result = await response.json()
                         processing_time = (datetime.now() - start_time).total_seconds()
-                        
+
                         # Update metrics
                         self.metrics['total_requests'] += 1
                         self.metrics['total_tokens'] += len(result.get('response', '').split())
@@ -139,7 +139,7 @@ class LLMService:
                             (self.metrics['avg_response_time'] * (self.metrics['total_requests'] - 1) + processing_time) /
                             self.metrics['total_requests']
                         )
-                        
+
                         return {
                             "response": result.get('response'),
                             "error": None,
@@ -170,7 +170,7 @@ class LLMService:
 
 class LLMClient:
     """Client for interacting with LLM service through the controller."""
-    
+
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
         self.config = config_manager.get_agent_config(agent_name)
@@ -179,7 +179,7 @@ class LLMClient:
         self.max_retries = 3
         self.retry_delay = 1.0  # seconds
         self.timeout = 60  # seconds
-    
+
     async def _check_health(self) -> bool:
         """Check if LLM service is healthy."""
         try:
@@ -192,7 +192,7 @@ class LLMClient:
         except Exception as e:
             logger.error(f"LLM health check failed: {e}")
             return False
-    
+
     async def generate(
         self,
         prompt: str,
@@ -200,18 +200,18 @@ class LLMClient:
         temperature: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
         """Generate content using LLM.
-        
+
         Args:
             prompt: The prompt to send to the LLM
             max_tokens: Maximum tokens to generate
             temperature: Temperature for generation
-            
+
         Returns:
             Dictionary containing the response or None on failure
         """
         if not await self._check_health():
             raise LLMError("LLM service is not healthy")
-        
+
         request = {
             "prompt": prompt,
             "model": self.model,
@@ -219,7 +219,7 @@ class LLMClient:
             "max_tokens": max_tokens,
             "temperature": temperature
         }
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -235,7 +235,7 @@ class LLMClient:
         except Exception as e:
             logger.error(f"Error in LLM request: {e}")
             return None
-    
+
     async def analyze_code(
         self,
         old_content: str,
@@ -243,12 +243,12 @@ class LLMClient:
         context: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
         """Analyze code changes using LLM.
-        
+
         Args:
             old_content: Previous version of the code
             new_content: New version of the code
             context: Additional context for the analysis
-            
+
         Returns:
             Analysis text or None on failure
         """
@@ -264,7 +264,7 @@ class LLMClient:
         except LLMError as e:
             logger.error(f"Failed to analyze code: {e}")
             return None
-    
+
     async def generate_documentation(
         self,
         content: str,
@@ -272,12 +272,12 @@ class LLMClient:
         existing_doc: Optional[str] = None
     ) -> Optional[str]:
         """Generate documentation using LLM.
-        
+
         Args:
             content: Code content to document
             doc_type: Type of documentation ('readme', 'changelog', etc.)
             existing_doc: Existing documentation to update
-            
+
         Returns:
             Generated documentation or None on failure
         """

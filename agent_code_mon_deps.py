@@ -23,6 +23,7 @@ import fnmatch
 import json
 from datetime import datetime
 from shared.base_agent import BaseAgent
+import websockets
 
 # Set up logging
 logger = AgentLogger('code_mon_deps')
@@ -295,16 +296,170 @@ class DependencyMonitor(BaseAgent):
         self.file_monitor = FileMonitor('code_mon_deps', self.handle_file_change)
         self.queue = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
+        self._message_task: Optional[asyncio.Task] = None
+
+        # Connection state management
+        self._connection_confirmed = False
+        self._connection_lock = asyncio.Lock()
+        self._message_queue = asyncio.Queue()
 
         # Load configuration
         self.config = config_manager.get_agent_config('code_mon_deps')
         self._update_delay = self.config.get('update_delay', UPDATE_DELAY)
-        self._batch_window = self.config.get('batch_window', 2.0)  # Time window to batch changes
-        self._max_queue_size = self.config.get('max_queue_size', 100)  # Maximum number of pending changes
+        self._batch_window = self.config.get('batch_window', 2.0)
+        self._max_queue_size = self.config.get('max_queue_size', 100)
+        self._max_ws_retries = 3
 
         self._last_update = 0
         self._cache_lock = asyncio.Lock()
         logger.info("Dependency monitor initialized with update delay: %s", self._update_delay)
+
+    async def _process_messages(self):
+        """Process incoming messages from the controller."""
+        while self.running:
+            try:
+                if not self.ws_agent:
+                    await asyncio.sleep(1)
+                    continue
+
+                message = await self.ws_agent.recv()
+                data = json.loads(message)
+
+                if data.get('type') == 'connection_confirmed':
+                    self._connection_confirmed = True
+                    logger.info("Connection confirmed by controller")
+                elif data.get('type') == 'ping':
+                    # Respond to ping with pong
+                    await self.ws_agent.send(json.dumps({
+                        "type": "pong",
+                        "timestamp": datetime.now().isoformat(),
+                        "agent": self.name
+                    }))
+                else:
+                    # Queue other messages for processing
+                    await self._message_queue.put(data)
+                    logger.debug(f"Queued message for processing: {data.get('type')}")
+
+            except websockets.exceptions.ConnectionClosed:
+                logger.error("WebSocket connection closed")
+                self._connection_confirmed = False
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error processing message: {e}")
+                await asyncio.sleep(1)
+
+    async def connect(self):
+        """Establish connection with proper handshake."""
+        async with self._connection_lock:
+            try:
+                # First ensure we're disconnected
+                await self.disconnect()
+
+                # Connect to agent endpoint
+                self.ws_agent = await websockets.connect("ws://localhost:8000/ws/agent")
+                logger.info("WebSocket connection established")
+
+                # Send initial connect message
+                connect_message = {
+                    "type": "agent_connect",
+                    "timestamp": datetime.now().isoformat(),
+                    "agent": self.name,
+                    "data": {
+                        "status": self.get_status()
+                    }
+                }
+                await self.ws_agent.send(json.dumps(connect_message))
+                logger.info("Sent initial connect message")
+
+                # Wait for confirmation with timeout
+                try:
+                    deadline = time.time() + 5.0
+                    while time.time() < deadline and not self._connection_confirmed:
+                        try:
+                            response = await asyncio.wait_for(
+                                self.ws_agent.recv(), 
+                                timeout=max(0.1, deadline - time.time())
+                            )
+                            data = json.loads(response)
+
+                            if data.get('type') == 'connection_confirmed':
+                                self._connection_confirmed = True
+                                logger.info("Connection confirmed by controller")
+                                break
+                            else:
+                                # Queue any other messages received during connection
+                                await self._message_queue.put(data)
+                        except asyncio.TimeoutError:
+                            break
+
+                    if not self._connection_confirmed:
+                        logger.error("Connection confirmation not received")
+                        await self.disconnect()
+                        return False
+
+                    # Only connect to logs after agent connection is confirmed
+                    try:
+                        self.ws_logs = await websockets.connect("ws://localhost:8000/ws/logs")
+                        logger.info("Connected to log stream")
+                    except Exception as e:
+                        logger.error(f"Failed to connect to log stream: {e}")
+                        await self.disconnect()
+                        return False
+
+                    return True
+
+                except Exception as e:
+                    logger.error(f"Error during handshake: {e}")
+                    await self.disconnect()
+                    return False
+
+            except Exception as e:
+                logger.error(f"Connection failed: {e}")
+                await self.disconnect()
+                return False
+
+    async def disconnect(self):
+        """Clean disconnect from all connections."""
+        async with self._connection_lock:
+            self._connection_confirmed = False
+
+            if self.ws_agent:
+                try:
+                    await self.ws_agent.send(json.dumps({
+                        "type": "agent_disconnect",
+                        "timestamp": datetime.now().isoformat(),
+                        "agent": self.name
+                    }))
+                except Exception as e:
+                    logger.warning(f"Failed to send disconnect message: {e}")
+
+                try:
+                    await self.ws_agent.close()
+                except Exception as e:
+                    logger.error(f"Error closing agent connection: {e}")
+                finally:
+                    self.ws_agent = None
+
+            if self.ws_logs:
+                try:
+                    await self.ws_logs.close()
+                except Exception as e:
+                    logger.error(f"Error closing logs connection: {e}")
+                finally:
+                    self.ws_logs = None
+
+            # Clear message queue
+            while not self._message_queue.empty():
+                try:
+                    self._message_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+    async def ensure_connection(self):
+        """Check connection state and reconnect if necessary."""
+        if not self.ws_agent or not self._connection_confirmed:
+            return await self.connect()
+        return True
 
     async def handle_file_change(self, file_path: str) -> None:
         """Handle file change event."""
@@ -314,20 +469,135 @@ class DependencyMonitor(BaseAgent):
                 return
 
             logger.info(f"Detected modification to {file_path}")
+
+            # Ensure connection before sending
+            if not await self.ensure_connection():
+                logger.error("Failed to ensure WebSocket connection")
+                return
+
             # Send activity message
+            logger.info("Sending file_modified activity for %s", file_path)
             await self.send_activity(
                 action="file_modified",
                 file_path=file_path
             )
+            logger.info("Queueing file for processing: %s", file_path)
             await self.queue.put(file_path)
         except Exception as e:
             logger.error(f"Error handling file change for {file_path}: {str(e)}", exc_info=True)
 
+    async def start(self, path: str):
+        """Start monitoring."""
+        logger.info("Starting dependency monitor for path: %s", path)
+
+        if not self.running:
+            self.running = True
+            logger.info("Agent running state set to True")
+
+        # Start message processing
+        if not self._message_task or self._message_task.done():
+            self._message_task = asyncio.create_task(self._process_messages())
+            logger.info("Message processing task started")
+
+        # Establish initial connection
+        if not await self.connect():
+            logger.error("Failed to establish initial connection")
+            self.running = False
+            if self._message_task:
+                self._message_task.cancel()
+            return
+
+        logger.info("Initial connection established")
+
+        if not self._task or self._task.done():
+            self._task = asyncio.create_task(self.start_processing())
+            logger.info("File processing task started")
+
+        # Start file monitoring
+        try:
+            self.file_monitor.start(path)
+            logger.info("File monitor started for path: %s", path)
+        except Exception as e:
+            logger.error("Failed to start file monitor: %s", e)
+            self.running = False
+            if self._message_task:
+                self._message_task.cancel()
+            if self._task:
+                self._task.cancel()
+            return
+
+        logger.info("All tasks started, entering main loop")
+
+        # Create tasks for both the run loop and our processing
+        tasks = [
+            asyncio.create_task(self.run()),
+            self._message_task,
+            self._task
+        ]
+
+        try:
+            # Wait for any task to complete or fail
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # If any task completed, log it and stop everything
+            for task in done:
+                try:
+                    result = await task
+                    logger.error("Task completed unexpectedly: %s", result)
+                except Exception as e:
+                    logger.error("Task failed with error: %s", e)
+
+            # Cancel remaining tasks
+            for task in pending:
+                task.cancel()
+
+            await self.stop()
+
+        except Exception as e:
+            logger.error("Error in main loop: %s", e)
+            await self.stop()
+
+    async def stop(self):
+        """Stop monitoring and clean up resources."""
+        self.running = False
+
+        # Cancel tasks
+        if self._task:
+            self._task.cancel()
+        if self._message_task:
+            self._message_task.cancel()
+
+        # Stop file monitoring
+        self.file_monitor.stop()
+        self.analyzer.clear_cache()
+
+        # Clear queues
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        while not self._message_queue.empty():
+            try:
+                self._message_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        # Disconnect WebSockets
+        await self.disconnect()
+
     async def start_processing(self):
         """Start processing the file queue."""
+        logger.info("Starting file processing loop")
         while True:
             try:
+                logger.debug("Waiting for file in queue...")
                 file_path = await self.queue.get()
+                logger.info("Processing file: %s", file_path)
 
                 # Apply debouncing
                 now = time.time()
@@ -339,63 +609,67 @@ class DependencyMonitor(BaseAgent):
                     # Use lock to protect cache and visualization operations
                     async with self._cache_lock:
                         if os.path.exists(file_path):
-                            # Send analysis start message
-                            await self.send_activity(
-                                action="analyzing_dependencies",
-                                file_path=file_path
-                            )
+                            # Ensure WebSocket connection before sending messages
+                            if not await self.ensure_connection():
+                                logger.error("Failed to ensure WebSocket connection")
+                                continue
 
-                            self.analyzer.invalidate_file(file_path)  # Only invalidate affected files
+                            logger.info("Starting dependency analysis for %s", file_path)
+                            # Send analysis start message with retry
+                            retry_count = 0
+                            while retry_count < self._max_ws_retries:
+                                try:
+                                    await self.send_activity(
+                                        action="analyzing_dependencies",
+                                        file_path=file_path
+                                    )
+                                    break
+                                except Exception as e:
+                                    retry_count += 1
+                                    if retry_count >= self._max_ws_retries:
+                                        logger.error(f"Failed to send start message after {retry_count} attempts: {e}")
+                                        break
+                                    logger.warning(f"Failed to send start message (attempt {retry_count}): {e}")
+                                    await asyncio.sleep(1 * retry_count)
+
+                            self.analyzer.invalidate_file(file_path)
+                            logger.info("Updating visualization")
                             await self.visualizer.update_visualization()
 
-                            # Send analysis complete message
-                            await self.send_activity(
-                                action="analysis_complete",
-                                file_path=file_path,
-                                details={
-                                    "dependencies": len(self.analyzer._cache.get(file_path, [])),
-                                    "dependents": len(self.analyzer._dependents.get(file_path, set()))
-                                }
-                            )
+                            # Send analysis complete message with retry
+                            logger.info("Analysis complete, sending results")
+                            retry_count = 0
+                            while retry_count < self._max_ws_retries:
+                                try:
+                                    await self.send_activity(
+                                        action="analysis_complete",
+                                        file_path=file_path,
+                                        details={
+                                            "dependencies": len(self.analyzer._cache.get(file_path, [])),
+                                            "dependents": len(self.analyzer._dependents.get(file_path, set()))
+                                        }
+                                    )
+                                    break
+                                except Exception as e:
+                                    retry_count += 1
+                                    if retry_count >= self._max_ws_retries:
+                                        logger.error(f"Failed to send complete message after {retry_count} attempts: {e}")
+                                        break
+                                    logger.warning(f"Failed to send complete message (attempt {retry_count}): {e}")
+                                    await asyncio.sleep(1 * retry_count)
+
                 except Exception as e:
                     logger.error(f"Error updating visualization for {file_path}: {str(e)}", exc_info=True)
                 finally:
                     self.queue.task_done()
+                    logger.info("Finished processing %s", file_path)
 
             except asyncio.CancelledError:
+                logger.info("File processing loop cancelled")
                 break
             except Exception as e:
                 logger.error(f"Error in queue processor: {str(e)}", exc_info=True)
                 await asyncio.sleep(1)
-
-    async def start(self, path: str):
-        """Start monitoring."""
-        if not self.running:
-            self.running = True
-
-        if not self._task or self._task.done():
-            self._task = asyncio.create_task(self.start_processing())
-
-        # Start file monitoring
-        self.file_monitor.start(path)
-
-        # Start the BaseAgent run loop and keep running
-        await self.run()  # This will keep running until self.running is False
-
-    async def stop(self):
-        """Stop monitoring and clean up resources."""
-        self.running = False
-        if self._task:
-            self._task.cancel()
-        self.file_monitor.stop()
-        self.analyzer.clear_cache()
-        # Ensure queue is empty
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        await self.disconnect()  # Disconnect WebSockets
 
 class DependencyVisualizer:
     """Generates and maintains dependency visualizations."""
