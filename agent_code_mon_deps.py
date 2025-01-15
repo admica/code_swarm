@@ -240,124 +240,202 @@ class DependencyAgent(BaseAgent):
 
     def generate_mermaid(self) -> str:
         """Generate Mermaid diagram from current dependencies."""
-        # Default to TB (top-bottom) for better width control
-        direction = 'TB'  # Override direction to control width
-        mermaid = [f"graph {direction}"]
+        # Add metadata section for layout control
+        mermaid = [
+            "---",
+            "config:",
+            "    layout: elk",
+            "    elk:",
+            "        algorithm: layered",
+            "        nodePlacementStrategy: BRANDES_KOEPF",
+            "        hierarchyHandling: INCLUDE_CHILDREN",
+            "        spacing: 40",
+            "        feedbackEdges: true",
+            "        aspectRatio: 0.5",  # Favor vertical growth
+            "---",
+            "flowchart TD",
+            "    %% Use TD (top-down) direction",
+        ]
         
-        # Add enhanced style definitions with more compact nodes
+        # Add enhanced style definitions
         mermaid.extend([
             "    %% Node styles",
             "    classDef python fill:#2b5b84,stroke:#1a365d,color:#fff,stroke-width:2px;",
             "    classDef lua fill:#000080,stroke:#000066,color:#fff,stroke-width:2px;",
             "    classDef heavy_deps fill:#8b0000,stroke:#580000,color:#fff,stroke-width:3px;",
             "    classDef light_deps fill:#006400,stroke:#004100,color:#fff,stroke-width:1px;",
+            "    classDef cluster fill:#2d2d2d,stroke:#404040,color:#fff;",
             "",
             "    %% Link styles",
             "    linkStyle default stroke:#666,stroke-width:1px;",
         ])
 
-        # Helper function to create shorter node labels
         def create_short_label(file_path: str) -> str:
+            """Create a very short label for the node."""
             name = os.path.basename(file_path)
-            # Remove common extensions
             name = re.sub(r'\.(py|lua)$', '', name)
-            # Truncate if too long
-            if len(name) > 15:
-                name = name[:12] + '...'
+            # More aggressive shortening
+            if len(name) > 12:
+                # Keep first 6 and last 3 chars
+                name = f"{name[:6]}~{name[-3:]}"
             return name
 
-        # Group files by directory if enabled
-        if self.config.get('group_by_directory', True):
-            # Build directory structure with depth tracking
-            dir_structure = {}
-            max_depth = 0
-            for file_path in self._dependencies.keys():
-                rel_path = os.path.relpath(file_path, self.root_path)
-                dir_name = os.path.dirname(rel_path)
-                depth = len(dir_name.split(os.sep)) if dir_name else 0
-                max_depth = max(max_depth, depth)
-                
-                if dir_name not in dir_structure:
-                    dir_structure[dir_name] = {'files': [], 'depth': depth}
-                dir_structure[dir_name]['files'].append(file_path)
-
-            # Process directories by depth to maintain vertical hierarchy
-            for depth in range(max_depth + 1):
-                dirs_at_depth = {k: v for k, v in dir_structure.items() 
-                               if v['depth'] == depth and k != ''}
-                
-                if not dirs_at_depth:
+        # Analyze dependency relationships to create clusters
+        dependency_clusters = self._create_dependency_clusters()
+        
+        # Track nodes that have been added
+        added_nodes = set()
+        
+        # Add nodes in clusters to control layout
+        for cluster_idx, cluster in enumerate(dependency_clusters):
+            cluster_name = f"cluster_{cluster_idx}"
+            # Use orientation hint in subgraph
+            mermaid.append(f"    subgraph {cluster_name}[Cluster {cluster_idx + 1}]")
+            mermaid.append("        direction: TB")
+            
+            # Sort files by their dependency relationships for better layering
+            cluster_files = sorted(cluster, 
+                                 key=lambda f: (
+                                     len(self._dependencies.get(f, [])),  # Primary: number of outgoing deps
+                                     -sum(1 for deps in self._dependencies.values() if f in deps)  # Secondary: incoming deps
+                                 ),
+                                 reverse=True)
+            
+            # Add rank hints for better vertical alignment
+            current_rank = []
+            current_deps = -1
+            
+            for file_path in cluster_files:
+                if file_path in added_nodes:
                     continue
                     
-                # Create a containing subgraph for this level if multiple directories
-                if len(dirs_at_depth) > 1:
-                    mermaid.append(f"    subgraph level_{depth}[Level {depth}]")
-                    mermaid.append(f"    direction {direction}")
+                node_id = os.path.relpath(file_path, self.root_path).replace(os.sep, '_')
+                file_name = create_short_label(file_path)
                 
-                # Create subgraphs for each directory at this depth
-                for dir_name, data in dirs_at_depth.items():
-                    subgraph_name = dir_name.replace(os.sep, '_')
-                    # Use shorter directory names
-                    display_name = os.path.basename(dir_name) if dir_name else dir_name
-                    mermaid.append(f"    subgraph {subgraph_name}[{display_name}]")
-                    mermaid.append(f"    direction {direction}")
-                    
-                    # Add nodes for this directory
-                    for file_path in data['files']:
-                        node_id = os.path.relpath(file_path, self.root_path).replace(os.sep, '_')
-                        file_name = create_short_label(file_path)
-                        
-                        # Determine node style based on number of dependencies
-                        deps_count = len(self._dependencies[file_path])
-                        if deps_count > 5:
-                            style = ":::heavy_deps"
-                        elif deps_count == 0:
-                            style = ":::light_deps"
-                        else:
-                            style = ":::python" if file_path.endswith('.py') else ":::lua"
-                        
-                        mermaid.append(f"        {node_id}[{file_name}]{style}")
-                    
-                    mermaid.append("    end")
+                # Determine node style
+                deps_count = len(self._dependencies.get(file_path, []))
                 
-                if len(dirs_at_depth) > 1:
-                    mermaid.append("    end")
-            
-            # Add root files last
-            root_files = dir_structure.get('', {}).get('files', [])
-            if root_files:
-                mermaid.append("")
-                mermaid.append("    %% Root directory files")
-                for file_path in root_files:
-                    node_id = os.path.relpath(file_path, self.root_path).replace(os.sep, '_')
-                    file_name = create_short_label(file_path)
+                # Start new rank group if dependency count changes
+                if deps_count != current_deps:
+                    if current_rank:
+                        # Add rank grouping for previous nodes
+                        mermaid.append(f"        {{rank=same {' '.join(current_rank)}}}")
+                        current_rank = []
+                    current_deps = deps_count
+                
+                if deps_count > 5:
+                    style = ":::heavy_deps"
+                elif deps_count == 0:
+                    style = ":::light_deps"
+                else:
                     style = ":::python" if file_path.endswith('.py') else ":::lua"
-                    mermaid.append(f"    {node_id}[{file_name}]{style}")
-        else:
-            # Add all nodes without grouping
-            for file_path in self._dependencies.keys():
+                
+                mermaid.append(f"        {node_id}[{file_name}]{style}")
+                current_rank.append(node_id)
+                added_nodes.add(file_path)
+            
+            # Add final rank group if any nodes remain
+            if current_rank:
+                mermaid.append(f"        {{rank=same {' '.join(current_rank)}}}")
+            
+            mermaid.append("    end")
+            mermaid.append(f"    style {cluster_name} fill:#2d2d2d,stroke:#404040,color:#fff")
+        
+        # Add any remaining nodes that weren't in clusters
+        remaining_files = set(self._dependencies.keys()) - added_nodes
+        if remaining_files:
+            mermaid.append("")
+            mermaid.append("    %% Unclustered files")
+            for file_path in remaining_files:
                 node_id = os.path.relpath(file_path, self.root_path).replace(os.sep, '_')
                 file_name = create_short_label(file_path)
                 style = ":::python" if file_path.endswith('.py') else ":::lua"
                 mermaid.append(f"    {node_id}[{file_name}]{style}")
         
-        # Add relationships with different arrow styles based on dependency type
+        # Add relationships with explicit ordering to minimize crossings
         mermaid.append("")
         mermaid.append("    %% Dependencies")
+        
+        # Sort dependencies to minimize crossings
+        edges = []
         for file_path, deps in self._dependencies.items():
             if not deps:
                 continue
-                
+            
             source = os.path.relpath(file_path, self.root_path).replace(os.sep, '_')
             for dep in deps:
                 target = os.path.relpath(dep, self.root_path).replace(os.sep, '_')
-                # Use thicker arrow for direct imports
-                if dep in self._dependencies.get(file_path, []):
-                    mermaid.append(f"    {source} ==> {target}")
-                else:
-                    mermaid.append(f"    {source} --> {target}")
-                
+                # Calculate edge weight based on node positions
+                weight = len(self._dependencies.get(dep, [])) * 100 + len(deps)
+                edges.append((source, target, weight))
+        
+        # Sort edges by weight to prioritize important connections
+        edges.sort(key=lambda x: x[2], reverse=True)
+        
+        # Add edges with consistent ordering
+        for source, target, _ in edges:
+            if target in self._dependencies.get(source, []):
+                mermaid.append(f"    {source} ==> {target}")
+            else:
+                mermaid.append(f"    {source} --> {target}")
+        
         return "\n".join(mermaid)
+
+    def _create_dependency_clusters(self) -> List[Set[str]]:
+        """Create clusters of related files based on their dependencies."""
+        # Build adjacency matrix
+        files = list(self._dependencies.keys())
+        file_to_idx = {f: i for i, f in enumerate(files)}
+        
+        # Create undirected graph of dependencies
+        graph = {f: set() for f in files}
+        for file_path, deps in self._dependencies.items():
+            for dep in deps:
+                if dep in graph:
+                    graph[file_path].add(dep)
+                    graph[dep].add(file_path)
+        
+        # Find clusters using a simple clustering algorithm
+        clusters: List[Set[str]] = []
+        visited = set()
+        
+        def dfs(file_path: str, current_cluster: Set[str]):
+            """Depth-first search to find connected components."""
+            if file_path in visited:
+                return
+            visited.add(file_path)
+            current_cluster.add(file_path)
+            
+            # Add strongly connected files to same cluster
+            for neighbor in graph[file_path]:
+                if neighbor not in visited:
+                    dfs(neighbor, current_cluster)
+        
+        # Create initial clusters based on connected components
+        for file_path in files:
+            if file_path not in visited:
+                current_cluster = set()
+                dfs(file_path, current_cluster)
+                if current_cluster:
+                    clusters.append(current_cluster)
+        
+        # Split large clusters
+        MAX_CLUSTER_SIZE = 8
+        final_clusters = []
+        for cluster in clusters:
+            if len(cluster) > MAX_CLUSTER_SIZE:
+                # Split based on dependency count
+                sorted_files = sorted(cluster, 
+                                   key=lambda f: len(self._dependencies.get(f, [])),
+                                   reverse=True)
+                
+                # Create smaller clusters
+                for i in range(0, len(sorted_files), MAX_CLUSTER_SIZE):
+                    final_clusters.append(set(sorted_files[i:i + MAX_CLUSTER_SIZE]))
+            else:
+                final_clusters.append(cluster)
+        
+        return final_clusters
 
     async def update_graph_file(self) -> None:
         """Update the dependency graph markdown file."""
