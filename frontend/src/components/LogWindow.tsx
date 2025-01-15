@@ -45,32 +45,46 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
   const parseBackendLog = (log: string): ActivityMessage | null => {
     try {
       const timestamp = log.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)?.[0] || new Date().toISOString();
-      const isError = log.includes(' ERROR ');
-      const isWarning = log.includes(' WARNING ');
+      
+      // Look for the last log level indicator in case of wrapped messages
+      const logParts = log.split(/- (?:INFO|WARNING|ERROR) -/);
+      const lastPart = logParts[logParts.length - 1].trim();
+      
+      // Determine the log level - check the whole message for level indicators
+      const level = log.includes(' ERROR - ') 
+        ? 'error' 
+        : log.includes(' WARNING - ') 
+          ? 'warning' 
+          : 'info';
       
       // Parse controller logs
       if (log.includes('swarm_controller')) {
-        const message = log.replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - swarm_controller - /, '');
+        const message = log.replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - swarm_controller - (?:INFO|WARNING|ERROR) - /, '');
         return {
           timestamp,
           type: 'log',
           agent: 'controller',
           content: message,
-          level: isError ? 'error' : isWarning ? 'warning' : 'info'
+          level
         };
       }
       
-      // Parse agent logs
+      // Parse agent logs - extract actual message content
       const agentMatch = log.match(/agent_code_mon_(\w+)/);
       const agent = agentMatch ? agentMatch[1] : '';
-      const message = log.replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - /, '');
+      
+      // Get the actual message content, handling both wrapped and direct logs
+      let message = lastPart;
+      if (message.includes(': ')) {
+        message = message.split(': ').slice(1).join(': ');
+      }
       
       return {
         timestamp,
         type: 'log',
         agent,
         content: message,
-        level: isError ? 'error' : isWarning ? 'warning' : 'info'
+        level
       };
     } catch (error) {
       console.error('Error parsing log:', error);
@@ -196,7 +210,7 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
                 log.level === 'warning' ? 'text-yellow-300' :
                 'text-slate-300'
               } break-all`}>
-                {log.content}
+                {log.content.length > 255 ? `${log.content.slice(0, 255)}...` : log.content}
                 {log.details && (
                   <span className="text-slate-500 ml-1">({log.details})</span>
                 )}
