@@ -11,7 +11,7 @@ from typing import Dict, List, Set, Optional
 from shared.base_agent import BaseAgent
 from shared.file_monitor import FileMonitor
 import websockets
-from shared import config_manager
+from shared import config_manager, LLMClient
 import fnmatch
 
 logger = logging.getLogger('code_mon_deps')
@@ -23,6 +23,9 @@ class DependencyAgent(BaseAgent):
         super().__init__('code_mon_deps')
         self.root_path = path
         self.graph_path = os.path.join(path, 'dependency_graph.md')
+        
+        # Add LLM client
+        self.llm_client = LLMClient('code_mon_deps')
         
         # Pass the async handler directly - FileMonitor will now handle it properly
         self.file_monitor = FileMonitor('code_mon_deps', self.handle_file_change)
@@ -188,20 +191,46 @@ class DependencyAgent(BaseAgent):
 
     def analyze_file(self, file_path: str) -> List[str]:
         """Analyze file dependencies."""
+        if not os.path.exists(file_path):
+            logger.debug(f"File does not exist: {file_path}")
+            return []
+            
+        if not os.path.isfile(file_path):
+            logger.debug(f"Not a file: {file_path}")
+            return []
+
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+                try:
+                    content = f.read()
+                except UnicodeDecodeError:
+                    logger.debug(f"Unable to read {file_path} as UTF-8, trying with system encoding")
+                    # Try again with system encoding
+                    with open(file_path, 'r') as f2:
+                        content = f2.read()
 
             if file_path.lower().endswith('.py'):
-                return [dep for dep in self._analyze_python(content, file_path) 
-                       if not self.should_ignore_path(dep)]
+                try:
+                    deps = [dep for dep in self._analyze_python(content, file_path) 
+                           if not self.should_ignore_path(dep)]
+                    logger.debug(f"Found {len(deps)} Python dependencies for {file_path}")
+                    return deps
+                except Exception as e:
+                    logger.error(f"Error analyzing Python imports in {file_path}: {e}")
+                    return []
             elif file_path.lower().endswith('.lua'):
-                return [dep for dep in self._analyze_lua(content, file_path)
-                       if not self.should_ignore_path(dep)]
+                try:
+                    deps = [dep for dep in self._analyze_lua(content, file_path)
+                           if not self.should_ignore_path(dep)]
+                    logger.debug(f"Found {len(deps)} Lua dependencies for {file_path}")
+                    return deps
+                except Exception as e:
+                    logger.error(f"Error analyzing Lua requires in {file_path}: {e}")
+                    return []
             return []
             
         except Exception as e:
-            logger.error(f"Error analyzing {file_path}: {e}")
+            logger.error(f"Error reading {file_path}: {e}")
             return []
 
     def _analyze_python(self, content: str, file_path: str) -> List[str]:
@@ -455,52 +484,136 @@ class DependencyAgent(BaseAgent):
         
         return final_clusters
 
+    async def get_ai_validation(self, dependencies: Dict[str, List[str]]) -> Optional[str]:
+        """Get AI validation and analysis of the dependency structure."""
+        try:
+            # Create a summary of the dependency structure
+            summary = []
+            for file_path, deps in dependencies.items():
+                rel_path = os.path.relpath(file_path, self.root_path)
+                dep_paths = [os.path.relpath(d, self.root_path) for d in deps]
+                summary.append(f"- {rel_path} depends on: {', '.join(dep_paths) if dep_paths else 'no dependencies'}")
+
+            prompt = f"""Analyze this Python/Lua project's dependency structure:
+
+Dependencies:
+{chr(10).join(summary)}
+
+Please provide:
+1. Validation of the dependency structure (identify any potential issues)
+2. Analysis of modularity and coupling
+3. Suggestions for improving the dependency organization
+4. Any potential circular dependencies or problematic patterns
+
+Keep the response focused and actionable."""
+
+            result = await self.llm_client.generate(
+                prompt=prompt,
+                max_tokens=1000,
+                temperature=0.7
+            )
+
+            if result and result.get('response'):
+                # Clean up the response
+                ai_response = result['response'].strip()
+                ai_response = ai_response.replace('(BEGIN AI Generated)', '')
+                ai_response = ai_response.replace('(END AI Generated)', '')
+                ai_response = ai_response.strip()
+                return f"\n## AI Analysis\n\n(BEGIN AI Generated)\n{ai_response}\n(END AI Generated)\n"
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting AI validation: {e}")
+            return None
+
     async def update_graph_file(self) -> None:
         """Update the dependency graph markdown file."""
         try:
-            mermaid = self.generate_mermaid()
-            
+            # Generate Mermaid diagram
+            try:
+                mermaid = self.generate_mermaid()
+            except Exception as e:
+                logger.error(f"Error generating Mermaid diagram: {e}")
+                return
+
+            # Get AI validation
+            try:
+                ai_analysis = await self.get_ai_validation(self._dependencies)
+            except Exception as e:
+                logger.error(f"Error getting AI analysis: {e}")
+                ai_analysis = None
+
+            # Prepare content
             content = [
                 "# Project Dependency Graph\n",
                 "## Visualization\n",
                 "```mermaid",
                 mermaid,
                 "```\n",
-                "## Dependencies\n"
             ]
+
+            # Add AI analysis if available
+            if ai_analysis:
+                content.append(ai_analysis)
+
+            content.append("\n## Detailed Dependencies\n")
             
             # Add detailed dependencies
-            for file_path, deps in self._dependencies.items():
-                rel_path = os.path.relpath(file_path, self.root_path)
-                content.append(f"### {rel_path}\n")
-                if deps:
-                    content.append("Depends on:")
-                    for dep in deps:
-                        dep_rel_path = os.path.relpath(dep, self.root_path)
-                        content.append(f"- {dep_rel_path}")
-                else:
-                    content.append("No dependencies")
-                content.append("")  # Empty line
+            try:
+                for file_path, deps in self._dependencies.items():
+                    try:
+                        rel_path = os.path.relpath(file_path, self.root_path)
+                        content.append(f"### {rel_path}\n")
+                        if deps:
+                            content.append("Depends on:")
+                            for dep in deps:
+                                try:
+                                    dep_rel_path = os.path.relpath(dep, self.root_path)
+                                    content.append(f"- {dep_rel_path}")
+                                except ValueError as e:
+                                    logger.error(f"Error getting relative path for {dep}: {e}")
+                                    continue
+                        else:
+                            content.append("No dependencies")
+                        content.append("")  # Empty line
+                    except Exception as e:
+                        logger.error(f"Error processing dependencies for {file_path}: {e}")
+                        continue
+            except Exception as e:
+                logger.error(f"Error processing dependencies list: {e}")
             
             # Write to file
-            with open(self.graph_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(content))
+            try:
+                with open(self.graph_path, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(content))
+            except Exception as e:
+                logger.error(f"Error writing to graph file: {e}")
+                return
                 
             # Send visualization update
-            await self.ws_agent.send(json.dumps({
-                "type": "visualization_update",
-                "timestamp": datetime.now().isoformat(),
-                "data": {
-                    "diagram": mermaid,
-                    "stats": {
-                        "total_files": len(self._dependencies),
-                        "total_dependencies": sum(len(deps) for deps in self._dependencies.values())
+            if self.ws_agent:
+                try:
+                    update_data = {
+                        "type": "visualization_update",
+                        "timestamp": datetime.now().isoformat(),
+                        "data": {
+                            "diagram": mermaid,
+                            "analysis": ai_analysis if ai_analysis else None,
+                            "stats": {
+                                "total_files": len(self._dependencies),
+                                "total_dependencies": sum(len(deps) for deps in self._dependencies.values())
+                            }
+                        }
                     }
-                }
-            }))
+                    await self.ws_agent.send(json.dumps(update_data))
+                except Exception as e:
+                    logger.error(f"Error sending visualization update: {e}")
+            else:
+                logger.debug("No websocket connection available for visualization update")
             
         except Exception as e:
-            logger.error(f"Error updating graph file: {e}")
+            logger.error(f"Error updating graph file: {e}", exc_info=True)
 
     async def handle_file_change(self, file_path: str) -> None:
         """Handle file change events."""
