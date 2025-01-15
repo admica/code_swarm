@@ -207,19 +207,66 @@ class DependencyAgent(BaseAgent):
     def _analyze_python(self, content: str, file_path: str) -> List[str]:
         """Analyze Python imports."""
         imports = []
-        for pattern in self.python_patterns:
+        current_dir = os.path.dirname(file_path)
+        
+        # Updated patterns to capture relative imports
+        patterns = [
+            # Standard imports
+            r'^import\s+([\w.]+)',
+            r'^from\s+([\w.]+)\s+import',
+            # Indented imports
+            r'^\s+import\s+([\w.]+)',
+            r'^\s+from\s+([\w.]+)\s+import',
+            # Relative imports
+            r'^from\s*(\.+)([\w.]*)\s+import',
+            r'^\s+from\s*(\.+)([\w.]*)\s+import'
+        ]
+        
+        for pattern in patterns:
             for match in re.finditer(pattern, content, re.MULTILINE):
-                module_path = match.group(1)
-                file_path_parts = module_path.split('.')
-                potential_paths = [
-                    os.path.join(self.root_path, *file_path_parts) + '.py',
-                    os.path.join(self.root_path, *file_path_parts, '__init__.py')
-                ]
+                if len(match.groups()) == 1:
+                    # Standard import
+                    module_path = match.group(1)
+                    file_path_parts = module_path.split('.')
+                    potential_paths = [
+                        os.path.join(self.root_path, *file_path_parts) + '.py',
+                        os.path.join(self.root_path, *file_path_parts, '__init__.py')
+                    ]
+                elif len(match.groups()) == 2:
+                    # Relative import
+                    dots, module_path = match.groups()
+                    level = len(dots)  # Number of dots for relative import
+                    
+                    # Start from current directory and go up based on dot count
+                    target_dir = current_dir
+                    for _ in range(level):
+                        target_dir = os.path.dirname(target_dir)
+                    
+                    if module_path:
+                        module_parts = module_path.split('.')
+                        target_dir = os.path.join(target_dir, *module_parts[:-1]) if len(module_parts) > 1 else target_dir
+                        potential_paths = [
+                            os.path.join(target_dir, module_parts[-1] + '.py'),
+                            os.path.join(target_dir, module_parts[-1], '__init__.py')
+                        ]
+                    else:
+                        # Just dots with no module path (e.g., "from .. import x")
+                        potential_paths = [os.path.join(target_dir, '__init__.py')]
+                else:
+                    continue
+                
+                # Filter out paths outside project root
+                potential_paths = [p for p in potential_paths 
+                                 if p.startswith(self.root_path) and 
+                                 not self.should_ignore_path(p)]
+                
+                # Add first existing path
                 for path in potential_paths:
-                    if os.path.exists(path):
+                    if os.path.exists(path) and path != file_path:  # Avoid self-references
                         imports.append(path)
                         break
-        return imports
+        
+        return list(set(imports))  # Remove duplicates
 
     def _analyze_lua(self, content: str, file_path: str) -> List[str]:
         """Analyze Lua requires."""
@@ -240,11 +287,10 @@ class DependencyAgent(BaseAgent):
 
     def generate_mermaid(self) -> str:
         """Generate Mermaid diagram from current dependencies."""
-        # Start with flowchart definition and orientation
+        # Start with flowchart definition
         mermaid = [
-            "flowchart TD",  # TD is more strict about top-down than TB
-            "    %% Force vertical layout",
-            "    graph[orientation]=TD",
+            "%%{init: {'flowchart': {'nodeSpacing': 50, 'rankSpacing': 50, 'htmlLabels': true}} }%%",
+            "flowchart TD",
         ]
         
         # Add enhanced style definitions
@@ -265,48 +311,48 @@ class DependencyAgent(BaseAgent):
                 name = f"{name[:6]}~{name[-3:]}"
             return name
 
-        # First, create a mapping of dependency depths
-        def calculate_depth(file_path: str, visited=None) -> int:
-            """Calculate the maximum dependency depth for a file."""
+        # Calculate dependency levels (distance from root)
+        def calculate_level(file_path: str, visited=None) -> int:
+            """Calculate the dependency level (0 = leaf, higher = more dependencies)."""
             if visited is None:
                 visited = set()
             if file_path in visited:
                 return 0
             visited.add(file_path)
-            deps = self._dependencies.get(file_path, [])
-            if not deps:
-                return 0
-            return 1 + max(calculate_depth(dep, visited.copy()) for dep in deps)
-
-        # Calculate depths for all files
-        depths = {f: calculate_depth(f) for f in self._dependencies.keys()}
-        max_depth = max(depths.values()) if depths else 0
-
-        # Create virtual ranks to force vertical layout
-        rank_groups = [[] for _ in range(max_depth + 1)]
-        for file_path, depth in depths.items():
-            rank_groups[depth].append(file_path)
-
-        # Sort files within each rank by number of dependencies
-        for rank in rank_groups:
-            rank.sort(key=lambda f: len(self._dependencies.get(f, [])), reverse=True)
-
-        # Add nodes rank by rank to enforce vertical layout
-        added_nodes = set()
-        for depth, rank_files in enumerate(rank_groups):
-            if not rank_files:
-                continue
-                
-            # Create a subgraph for this rank
-            mermaid.append(f"    subgraph rank_{depth}[Depth {depth}]")
-            mermaid.append("    direction: TB")
             
-            # Add all nodes at this rank
-            for file_path in rank_files:
+            dependents = [f for f, deps in self._dependencies.items() if file_path in deps]
+            if not dependents:
+                return 0
+            return 1 + max(calculate_level(dep, visited.copy()) for dep in dependents)
+
+        # Calculate levels for all files
+        levels = {f: calculate_level(f) for f in self._dependencies.keys()}
+        max_level = max(levels.values()) if levels else 0
+
+        # Group files by level
+        level_groups = [[] for _ in range(max_level + 1)]
+        for file_path, level in levels.items():
+            level_groups[level].append(file_path)
+
+        # Sort files within each level by number of dependencies
+        for level in level_groups:
+            level.sort(key=lambda f: len(self._dependencies.get(f, [])), reverse=True)
+
+        # Add nodes level by level
+        added_nodes = set()
+        for level, level_files in enumerate(level_groups):
+            if not level_files:
+                continue
+
+            # Create a subgraph for this level
+            mermaid.append(f"    subgraph level_{level}[Level {level}]")
+            mermaid.append("        direction TB")
+            
+            # Add nodes at this level
+            for file_path in level_files:
                 node_id = os.path.relpath(file_path, self.root_path).replace(os.sep, '_')
                 file_name = create_short_label(file_path)
                 
-                # Determine node style
                 deps_count = len(self._dependencies.get(file_path, []))
                 if deps_count > 5:
                     style = ":::heavy_deps"
@@ -324,23 +370,23 @@ class DependencyAgent(BaseAgent):
         mermaid.append("")
         mermaid.append("    %% Dependencies")
         
-        # Group edges by their depth difference to prioritize vertical connections
+        # Sort edges to prioritize vertical connections
         edges = []
         for source_file, deps in self._dependencies.items():
             if not deps:
                 continue
             
             source = os.path.relpath(source_file, self.root_path).replace(os.sep, '_')
-            source_depth = depths[source_file]
+            source_level = levels[source_file]
             
             for dep in deps:
                 target = os.path.relpath(dep, self.root_path).replace(os.sep, '_')
-                target_depth = depths[dep]
-                # Prioritize edges that span multiple levels
-                depth_diff = abs(source_depth - target_depth)
-                edges.append((source, target, depth_diff))
+                target_level = levels[dep]
+                # Calculate vertical distance for sorting
+                level_diff = abs(source_level - target_level)
+                edges.append((source, target, level_diff))
         
-        # Sort edges to add vertical edges first
+        # Sort edges by level difference (prioritize vertical connections)
         edges.sort(key=lambda x: (-x[2], x[0], x[1]))
         
         # Add edges in order
