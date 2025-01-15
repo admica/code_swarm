@@ -3,11 +3,15 @@
 import { useEffect, useState } from 'react';
 import { AgentState } from '../types/agents';
 import { Dashboard } from '../components/Dashboard';
+import { LLMMonitoring } from '../components/LLMMonitoring';
+import { Settings } from '../components/Settings';
+import { TabNavigation } from '../components/TabNavigation';
 import { agentsApi } from '../lib/api';
 
 export default function Home() {
   const [agents, setAgents] = useState<Record<string, AgentState>>({});
   const [monitorPath, setMonitorPath] = useState<string>('');
+  const [activeTab, setActiveTab] = useState('dashboard');
 
   // Fetch initial data
   useEffect(() => {
@@ -51,14 +55,30 @@ export default function Home() {
     }
   };
 
+  const renderContent = () => {
+    switch (activeTab) {
+      case 'dashboard':
+        return (
+          <Dashboard
+            agents={agents}
+            monitorPath={monitorPath}
+            onAgentStatusChange={handleAgentStatusChange}
+            onPathChange={handlePathChange}
+          />
+        );
+      case 'llm':
+        return <LLMMonitoring />;
+      case 'settings':
+        return <Settings />;
+      default:
+        return null;
+    }
+  };
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
-      <Dashboard
-        agents={agents}
-        monitorPath={monitorPath}
-        onAgentStatusChange={handleAgentStatusChange}
-        onPathChange={handlePathChange}
-      />
+      <TabNavigation activeTab={activeTab} onTabChange={setActiveTab} />
+      {renderContent()}
     </main>
   );
 }

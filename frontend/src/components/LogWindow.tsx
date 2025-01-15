@@ -182,7 +182,7 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
       </div>
       <div
         ref={logContainerRef}
-        className="flex-1 overflow-auto bg-slate-900/50 border border-slate-800 rounded-lg p-2 min-h-[300px] max-h-[500px]"
+        className="flex-1 overflow-auto bg-slate-900/50 border border-slate-800 rounded-lg p-2 min-h-[600px] max-h-[1000px]"
       >
         <div className="font-mono text-xs leading-4">
           {filteredLogs.map((log, index) => (

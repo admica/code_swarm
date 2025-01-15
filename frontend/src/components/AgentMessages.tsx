@@ -69,7 +69,7 @@ export function AgentMessages({ className = '' }: { className?: string }) {
           {messages.length} messages {messages.length === MAX_MESSAGES && '(max reached)'}
         </span>
       </div>
-      <div className="flex-1 overflow-auto bg-slate-900/50 border border-slate-800 rounded-lg p-2">
+      <div className="flex-1 overflow-auto bg-slate-900/50 border border-slate-800 rounded-lg p-2 min-h-[600px] max-h-[1000px]">
         <div className="space-y-1">
           {messages.map((message, index) => (
             <div key={index} className="flex items-start text-sm hover:bg-slate-800/30 p-1 rounded">

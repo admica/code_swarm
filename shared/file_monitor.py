@@ -19,6 +19,7 @@ class FileMonitor:
         self.callback = callback
         self.config = config_manager.get_agent_config(agent_name)
         self.logger = AgentLogger(agent_name)
+        self.loop = asyncio.get_event_loop()
 
         # Default to monitoring both Python and Lua files if not specified
         default_patterns = '*.py,*.lua'
@@ -101,7 +102,11 @@ class FileMonitor:
 
                 for file_path in changes:
                     try:
-                        self.callback(file_path)
+                        # Handle both sync and async callbacks
+                        if asyncio.iscoroutinefunction(self.callback):
+                            await self.callback(file_path)
+                        else:
+                            self.callback(file_path)
                     except Exception as e:
                         self.logger.error(
                             f"Error processing file {file_path}: {e}",

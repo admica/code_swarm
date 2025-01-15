@@ -25,6 +25,7 @@ from shared.llm import LLMService
 from shared.config import config_manager
 from shared.models import AgentStatus, LLMRequest, LLMResponse, LLMStatus, ControllerInfo
 import aiofiles
+import threading
 
 # Set up logging
 logger = logging.getLogger('swarm_controller')
@@ -541,7 +542,13 @@ class SwarmController:
                 [sys.executable, script_path, monitor_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                stdin=subprocess.DEVNULL,  # Explicitly close stdin
+                text=True,
+                bufsize=1,  # Line buffered
+                env={
+                    **os.environ,
+                    'PYTHONUNBUFFERED': '1'  # Force Python to be unbuffered
+                }
             )
 
             # Wait a moment to check if process started successfully
@@ -554,6 +561,20 @@ class SwarmController:
                 agent["status"].last_error = stderr or "Failed to start"
                 agent["status"].running = False
                 raise Exception(f"Agent failed to start: {stderr}")
+
+            # Start stdout/stderr readers
+            def read_output(pipe, is_stderr=False):
+                while True:
+                    line = pipe.readline()
+                    if not line:
+                        break
+                    if is_stderr:
+                        logger.error(f"Agent {agent_name}: {line.strip()}")
+                    else:
+                        logger.info(f"Agent {agent_name}: {line.strip()}")
+
+            threading.Thread(target=read_output, args=(process.stdout,), daemon=True).start()
+            threading.Thread(target=read_output, args=(process.stderr, True), daemon=True).start()
 
             agent["process"] = process
             agent["status"].pid = process.pid

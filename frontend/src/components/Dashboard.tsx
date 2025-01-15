@@ -1,7 +1,6 @@
 import { AgentState } from '@/types/agents';
 import { AgentCard } from '@/components/agents/AgentCard';
 import { MonitorPathSelector } from '@/components/MonitorPathSelector';
-import { SwarmActivity } from '@/components/SwarmActivity';
 import { LogWindow } from '@/components/LogWindow';
 import { AgentMessages } from '@/components/AgentMessages';
 import { useState } from 'react';
@@ -19,12 +18,11 @@ export function Dashboard({
   onAgentStatusChange,
   onPathChange
 }: DashboardProps) {
-  const [showActivity, setShowActivity] = useState(true);
   const [showLogs, setShowLogs] = useState(true);
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="p-4">
+      <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold">Code Swarm</h1>
         </div>
@@ -52,9 +50,6 @@ export function Dashboard({
       </div>
 
       <div className="space-y-6">
-        {showActivity && (
-          <SwarmActivity />
-        )}
         {showLogs && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <LogWindow agents={Object.keys(agents)} />
