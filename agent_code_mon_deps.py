@@ -316,6 +316,8 @@ class DependencyAgent(BaseAgent):
 
     def generate_mermaid(self) -> str:
         """Generate Mermaid diagram from current dependencies."""
+        logger.debug(f"Generating Mermaid diagram for {len(self._dependencies)} files")
+        
         # Start with flowchart definition
         mermaid = [
             "%%{init: {'flowchart': {'nodeSpacing': 50, 'rankSpacing': 50, 'htmlLabels': true}} }%%",
@@ -355,13 +357,27 @@ class DependencyAgent(BaseAgent):
             return 1 + max(calculate_level(dep, visited.copy()) for dep in dependents)
 
         # Calculate levels for all files
-        levels = {f: calculate_level(f) for f in self._dependencies.keys()}
-        max_level = max(levels.values()) if levels else 0
+        try:
+            logger.debug("Calculating dependency levels...")
+            levels = {f: calculate_level(f) for f in self._dependencies.keys()}
+            max_level = max(levels.values()) if levels else 0
+            logger.debug(f"Found {max_level + 1} dependency levels")
+        except Exception as e:
+            logger.error(f"Error calculating dependency levels: {e}")
+            raise
 
         # Group files by level
-        level_groups = [[] for _ in range(max_level + 1)]
-        for file_path, level in levels.items():
-            level_groups[level].append(file_path)
+        try:
+            level_groups = [[] for _ in range(max_level + 1)]
+            for file_path, level in levels.items():
+                level_groups[level].append(file_path)
+            
+            # Log level distribution
+            for level, files in enumerate(level_groups):
+                logger.debug(f"Level {level}: {len(files)} files")
+        except Exception as e:
+            logger.error(f"Error grouping files by level: {e}")
+            raise
 
         # Sort files within each level by number of dependencies
         for level in level_groups:
@@ -369,63 +385,88 @@ class DependencyAgent(BaseAgent):
 
         # Add nodes level by level
         added_nodes = set()
-        for level, level_files in enumerate(level_groups):
-            if not level_files:
-                continue
+        try:
+            for level, level_files in enumerate(level_groups):
+                if not level_files:
+                    continue
 
-            # Create a subgraph for this level
-            mermaid.append(f"    subgraph level_{level}[Level {level}]")
-            mermaid.append("        direction TB")
-            
-            # Add nodes at this level
-            for file_path in level_files:
-                node_id = os.path.relpath(file_path, self.root_path).replace(os.sep, '_')
-                file_name = create_short_label(file_path)
+                # Create a subgraph for this level
+                mermaid.append(f"    subgraph level_{level}[Level {level}]")
+                mermaid.append("        direction TB")
                 
-                deps_count = len(self._dependencies.get(file_path, []))
-                if deps_count > 5:
-                    style = ":::heavy_deps"
-                elif deps_count == 0:
-                    style = ":::light_deps"
-                else:
-                    style = ":::python" if file_path.endswith('.py') else ":::lua"
+                # Add nodes at this level
+                for file_path in level_files:
+                    try:
+                        node_id = os.path.relpath(file_path, self.root_path).replace(os.sep, '_')
+                        file_name = create_short_label(file_path)
+                        
+                        deps_count = len(self._dependencies.get(file_path, []))
+                        if deps_count > 5:
+                            style = ":::heavy_deps"
+                        elif deps_count == 0:
+                            style = ":::light_deps"
+                        else:
+                            style = ":::python" if file_path.endswith('.py') else ":::lua"
+                        
+                        mermaid.append(f"        {node_id}[{file_name}]{style}")
+                        added_nodes.add(file_path)
+                    except Exception as e:
+                        logger.error(f"Error adding node for {file_path}: {e}")
+                        continue
                 
-                mermaid.append(f"        {node_id}[{file_name}]{style}")
-                added_nodes.add(file_path)
-            
-            mermaid.append("    end")
+                mermaid.append("    end")
+        except Exception as e:
+            logger.error(f"Error adding nodes to diagram: {e}")
+            raise
 
         # Add edges with explicit ordering to minimize crossings
         mermaid.append("")
         mermaid.append("    %% Dependencies")
         
         # Sort edges to prioritize vertical connections
-        edges = []
-        for source_file, deps in self._dependencies.items():
-            if not deps:
-                continue
+        try:
+            edges = []
+            for source_file, deps in self._dependencies.items():
+                if not deps:
+                    continue
+                
+                try:
+                    source = os.path.relpath(source_file, self.root_path).replace(os.sep, '_')
+                    source_level = levels[source_file]
+                    
+                    for dep in deps:
+                        target = os.path.relpath(dep, self.root_path).replace(os.sep, '_')
+                        target_level = levels[dep]
+                        # Calculate vertical distance for sorting
+                        level_diff = abs(source_level - target_level)
+                        edges.append((source, target, level_diff))
+                except Exception as e:
+                    logger.error(f"Error processing edge for {source_file}: {e}")
+                    continue
             
-            source = os.path.relpath(source_file, self.root_path).replace(os.sep, '_')
-            source_level = levels[source_file]
-            
-            for dep in deps:
-                target = os.path.relpath(dep, self.root_path).replace(os.sep, '_')
-                target_level = levels[dep]
-                # Calculate vertical distance for sorting
-                level_diff = abs(source_level - target_level)
-                edges.append((source, target, level_diff))
-        
+            logger.debug(f"Generated {len(edges)} edges")
+        except Exception as e:
+            logger.error(f"Error generating edges: {e}")
+            raise
+
         # Sort edges by level difference (prioritize vertical connections)
         edges.sort(key=lambda x: (-x[2], x[0], x[1]))
         
         # Add edges in order
+        edge_count = 0
         for source, target, _ in edges:
-            # Use thicker arrows for direct dependencies
-            if target in self._dependencies.get(source.replace('_', os.sep), []):
-                mermaid.append(f"    {source} ==> {target}")
-            else:
-                mermaid.append(f"    {source} --> {target}")
+            try:
+                # Use thicker arrows for direct dependencies
+                if target in self._dependencies.get(source.replace('_', os.sep), []):
+                    mermaid.append(f"    {source} ==> {target}")
+                else:
+                    mermaid.append(f"    {source} --> {target}")
+                edge_count += 1
+            except Exception as e:
+                logger.error(f"Error adding edge {source} -> {target}: {e}")
+                continue
         
+        logger.debug(f"Added {edge_count} edges to diagram")
         return "\n".join(mermaid)
 
     def _create_dependency_clusters(self) -> List[Set[str]]:

@@ -187,10 +187,10 @@ export function LogWindow({ agents, className = '' }: LogWindowProps) {
         <div className="font-mono text-xs leading-4">
           {filteredLogs.map((log, index) => (
             <div key={index} className="flex items-start hover:bg-slate-800/30">
-              <span className="text-slate-500 shrink-0 w-14 pl-1">
+              <span className="text-slate-500 shrink-0 w-20 pl-1">
                 {new Date(log.timestamp).toLocaleTimeString().split(':').slice(0, 2).join(':')}
               </span>
-              <span className="text-slate-400 shrink-0 w-16 px-1">[{log.agent || 'sys'}]</span>
+              <span className="text-slate-400 shrink-0 w-24 px-1">[{log.agent || 'sys'}]</span>
               <span className={`${
                 log.level === 'error' ? 'text-red-300' :
                 log.level === 'warning' ? 'text-yellow-300' :

@@ -73,10 +73,10 @@ export function AgentMessages({ className = '' }: { className?: string }) {
         <div className="space-y-1">
           {messages.map((message, index) => (
             <div key={index} className="flex items-start text-sm hover:bg-slate-800/30 p-1 rounded">
-              <span className="text-slate-500 shrink-0 w-14">
+              <span className="text-slate-500 shrink-0 w-20">
                 {new Date(message.timestamp).toLocaleTimeString().split(':').slice(0, 2).join(':')}
               </span>
-              <span className="text-slate-400 shrink-0 w-24 px-2">
+              <span className="text-slate-400 shrink-0 w-32 px-2">
                 [{message.agent || 'system'}]
               </span>
               <span className="text-slate-300 break-all">
