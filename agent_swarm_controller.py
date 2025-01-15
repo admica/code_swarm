@@ -568,10 +568,16 @@ class SwarmController:
                     line = pipe.readline()
                     if not line:
                         break
-                    if is_stderr:
-                        logger.error(f"Agent {agent_name}: {line.strip()}")
+                    line = line.strip()
+                    # Check if this is already a formatted log message
+                    if line.startswith('20') and (' - INFO - ' in line or ' - WARNING - ' in line or ' - ERROR - ' in line):
+                        logger.info(line)  # Pass through as-is
                     else:
-                        logger.info(f"Agent {agent_name}: {line.strip()}")
+                        # Only wrap raw output
+                        if is_stderr:
+                            logger.error(f"Agent {agent_name}: {line}")
+                        else:
+                            logger.info(f"Agent {agent_name}: {line}")
 
             threading.Thread(target=read_output, args=(process.stdout,), daemon=True).start()
             threading.Thread(target=read_output, args=(process.stderr, True), daemon=True).start()
