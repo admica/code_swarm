@@ -21,14 +21,61 @@ class BaseFileHandler(FileSystemEventHandler):
     """Base file handler for watching file changes."""
 
     def __init__(self, callback):
+        """Initialize the handler with a callback function.
+        
+        Args:
+            callback: Function to call with (event_type, file_path) when files change.
+                     event_type will be one of: 'created', 'modified', 'deleted'
+        """
         self.callback = callback
+        self.watch_patterns = ('.py', '.lua')  # Default patterns to watch
+        self._last_events = {}  # Track last event times to debounce
 
-    def on_modified(self, event):
+    def should_process_file(self, file_path: str) -> bool:
+        """Check if a file should be processed based on its extension."""
+        return any(file_path.endswith(ext) for ext in self.watch_patterns)
+
+    def _debounce_event(self, event_path: str) -> bool:
+        """Debounce events to prevent duplicates.
+        Returns True if event should be processed."""
+        now = datetime.now().timestamp()
+        last_time = self._last_events.get(event_path, 0)
+        
+        # Ignore events that are too close together (within 100ms)
+        if now - last_time < 0.1:
+            return False
+            
+        self._last_events[event_path] = now
+        return True
+
+    def on_created(self, event):
+        """Handle file creation events."""
         if event.is_directory:
             return
-        if not event.src_path.endswith('.py'):
+        if not self.should_process_file(event.src_path):
             return
-        self.callback(event.src_path)
+        if self._debounce_event(event.src_path):
+            self.callback('created', event.src_path)
+
+    def on_modified(self, event):
+        """Handle file modification events."""
+        if event.is_directory:
+            return
+        if not self.should_process_file(event.src_path):
+            return
+        if self._debounce_event(event.src_path):
+            self.callback('modified', event.src_path)
+
+    def on_deleted(self, event):
+        """Handle file deletion events."""
+        if event.is_directory:
+            return
+        if not self.should_process_file(event.src_path):
+            return
+        if self._debounce_event(event.src_path):
+            self.callback('deleted', event.src_path)
+            if event.src_path in self._last_events:
+                del self._last_events[event.src_path]
 
 class BaseAgent(ABC):
     """Base agent class implementing common functionality."""
@@ -49,6 +96,8 @@ class BaseAgent(ABC):
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
         self.reconnect_delay = 2  # seconds
+        self._connection_lock = asyncio.Lock()  # Add connection lock
+        self._is_connecting = False  # Add connection state flag
 
     def _load_config(self, config_path: str) -> Dict[str, str]:
         """Load configuration from file."""
@@ -63,20 +112,15 @@ class BaseAgent(ABC):
 
         return dict(config[self.name])
 
-    async def connect(self):
-        """Connect to the controller via WebSocket."""
-        success = True
-
-        # Connect to logs endpoint
+    async def connect(self) -> bool:
+        """Establish permanent connections to the controller.
+        If either connection fails, the agent will not start."""
         try:
+            # Connect to logs endpoint
             self.ws_logs = await websockets.connect(f"ws://localhost:8000/ws/logs")
             self.logger.info("Connected to log stream")
-        except Exception as e:
-            self.logger.error(f"Failed to connect to log stream: {e}")
-            success = False
 
-        # Connect to agent endpoint
-        try:
+            # Connect to agent endpoint
             self.ws_agent = await websockets.connect(f"ws://localhost:8000/ws/agent")
 
             # Send initial connect message
@@ -96,102 +140,100 @@ class BaseAgent(ABC):
                 data = json.loads(response)
                 if data.get('type') == 'connection_confirmed':
                     self.logger.info("Connected to agent message stream")
-                    self.reconnect_attempts = 0  # Reset counter on successful connection
+                    return True
                 else:
                     self.logger.error(f"Unexpected response during handshake: {data}")
-                    success = False
+                    return False
             except asyncio.TimeoutError:
                 self.logger.error("Timeout waiting for connection confirmation")
-                success = False
-            except Exception as e:
-                self.logger.error(f"Error during handshake: {e}")
-                success = False
+                return False
 
         except Exception as e:
-            self.logger.error(f"Failed to connect to agent message stream: {e}")
-            success = False
-
-        if not success:
+            self.logger.error(f"Failed to establish connections: {e}")
             await self.disconnect()
-
-        return success
+            return False
 
     async def disconnect(self):
-        """Disconnect from the controller."""
+        """Clean shutdown of connections."""
         if self.ws_logs:
             try:
-                if not getattr(self.ws_logs, 'closed', False):
-                    await self.ws_logs.close()
+                await self.ws_logs.close()
             except Exception as e:
-                self.logger.error(f"Error closing log WebSocket connection: {e}")
-            self.ws_logs = None
+                self.logger.error(f"Error closing log connection: {e}")
+            finally:
+                self.ws_logs = None
 
         if self.ws_agent:
             try:
-                if not getattr(self.ws_agent, 'closed', False):
-                    await self.ws_agent.close()
+                await self.ws_agent.close()
             except Exception as e:
-                self.logger.error(f"Error closing agent WebSocket connection: {e}")
-            self.ws_agent = None
+                self.logger.error(f"Error closing agent connection: {e}")
+            finally:
+                self.ws_agent = None
 
-    async def reconnect(self):
-        """Attempt to reconnect to the controller."""
-        self.reconnect_attempts += 1
-        if self.reconnect_attempts > self.max_reconnect_attempts:
-            self.logger.error("Max reconnection attempts reached")
-            return False
-
-        await self.disconnect()
-        delay = self.reconnect_delay * (2 ** (self.reconnect_attempts - 1))  # Exponential backoff
-        self.logger.info(f"Attempting reconnection in {delay} seconds (attempt {self.reconnect_attempts})")
-        await asyncio.sleep(delay)
-
-        return await self.connect()
-
-    async def ensure_connection(self):
-        """Ensure WebSocket connections are active."""
-        if not self.ws_agent or getattr(self.ws_agent, 'closed', True):
-            return await self.reconnect()
-        return True
-
-    async def send_activity(self, action: str, file_path: str, details: dict = None):
-        """Send an activity message through the agent WebSocket."""
-        if not await self.ensure_connection():
+    async def send_agent_message(self, msg_type: str, data: dict) -> None:
+        """Send a typed message to controller."""
+        if not self.ws_agent:
+            self.logger.error(f"Cannot send message, no connection: {msg_type}")
+            self.running = False  # Fatal error - trigger shutdown
             return
 
         try:
             message = {
-                "type": "agent_activity",
+                "type": msg_type,
                 "timestamp": datetime.now().isoformat(),
                 "agent": self.name,
-                "data": {
-                    "action": action,
-                    "file_path": file_path,
-                    "details": details or {}
-                }
+                "data": data
             }
             await self.ws_agent.send(json.dumps(message))
             self.last_activity = datetime.now()
         except Exception as e:
-            self.logger.error(f"Failed to send activity message: {e}")
-            await self.reconnect()
+            self.logger.error(f"Failed to send message: {e}")
+            self.running = False  # Fatal error - trigger shutdown
 
-    async def send_status(self):
-        """Send current status through the agent WebSocket."""
-        if not await self.ensure_connection():
-            return
-
+    async def run(self):
+        """Main agent run loop."""
         try:
-            message = {
-                "type": "agent_status",
-                "timestamp": datetime.now().isoformat(),
-                "agent": self.name,
-                "data": self.get_status()
-            }
-            await self.ws_agent.send(json.dumps(message))
-        except Exception as e:
-            self.logger.error(f"Failed to send status message: {e}")
-            await self.reconnect()
+            # Establish connections
+            if not await self.connect():
+                self.logger.error("Failed to establish connections")
+                return
+
+            self.running = True
+            
+            # Start health check loop
+            health_check_task = asyncio.create_task(self._health_check_loop())
+
+            # Main message handling loop
+            while self.running:
+                try:
+                    message = await self.ws_agent.recv()
+                    data = json.loads(message)
+                    await self.handle_controller_message(data)
+                    self.last_activity = datetime.now()
+                except websockets.exceptions.ConnectionClosed:
+                    self.logger.error("Lost connection to controller")
+                    break  # Fatal error - exit loop
+                except Exception as e:
+                    self.logger.error(f"Error in message loop: {e}")
+                    break  # Fatal error - exit loop
+
+        finally:
+            self.running = False
+            self.stop_monitoring()
+            await self.disconnect()
+            if 'health_check_task' in locals():
+                health_check_task.cancel()
+
+    async def _health_check_loop(self):
+        """Periodic health check and status report."""
+        while self.running:
+            try:
+                await self.send_agent_message("agent_status", self.get_status())
+            except Exception as e:
+                self.logger.error(f"Health check failed: {e}")
+                break  # Fatal error - exit loop
+            await asyncio.sleep(self.health_check_interval)
 
     async def handle_controller_message(self, message: dict):
         """Handle messages received from the controller."""
@@ -207,55 +249,17 @@ class BaseAgent(ABC):
         except Exception as e:
             self.logger.error(f"Error handling controller message: {e}")
 
-    async def run(self):
-        """Main agent run loop."""
-        try:
-            if not await self.connect():
-                return
-
-            # Start health check loop
-            health_check_task = asyncio.create_task(self._health_check_loop())
-
-            while self.running:
-                try:
-                    if not self.ws_agent:
-                        if not await self.reconnect():
-                            break
-
-                    # Handle WebSocket messages
-                    message = await self.ws_agent.recv()
-                    data = json.loads(message)
-                    await self.handle_controller_message(data)
-
-                    # Update last activity
-                    self.last_activity = datetime.now()
-
-                except websockets.exceptions.ConnectionClosed:
-                    if not await self.reconnect():
-                        break
-                except Exception as e:
-                    self.logger.error(f"Error in run loop: {e}")
-                    await asyncio.sleep(1)
-
-        finally:
-            self.stop_monitoring()
-            await self.disconnect()
-            if 'health_check_task' in locals():
-                health_check_task.cancel()
-
-    async def _health_check_loop(self):
-        """Periodic health check and status report."""
-        while self.running:
-            await self.send_status()
-            await asyncio.sleep(self.health_check_interval)
-
     async def log_activity(self, action: str, file_path: str, details: dict = None):
         """Log activity and send it through both logging and agent websocket."""
         # Log through regular logging system
         await self.log('info', f"{action}: {file_path}", category='activity')
 
         # Send through agent websocket
-        await self.send_activity(action, file_path, details)
+        await self.send_agent_message("agent_activity", {
+            "action": action,
+            "file_path": file_path,
+            "details": details or {}
+        })
 
     def get_status(self) -> Dict[str, Any]:
         """Get current agent status."""
@@ -288,7 +292,6 @@ class BaseAgent(ABC):
             }))
         except Exception as e:
             self.logger.error(f"Error reporting status: {e}")
-            await self.reconnect()
 
     async def log(self, level: str, category: str, message: str, **kwargs):
         """Send structured log message to controller."""
@@ -335,65 +338,50 @@ class BaseAgent(ABC):
             self.logger.error(f"Error getting LLM analysis: {e}")
             return None
 
-    def start_monitoring(self, path: str):
-        """Start monitoring a directory for changes."""
-        if self.observer:
-            self.observer.stop()
-            self.observer = None
-
+    def _handle_file_change(self, event_type: str, file_path: str):
+        """Handle file change events from the file handler.
+        
+        Args:
+            event_type: Type of event ('created', 'modified', or 'deleted')
+            file_path: Path to the file that changed
+        """
         try:
-            path = os.path.abspath(path)
-            if not os.path.exists(path):
-                os.makedirs(path)
-            elif not os.path.isdir(path):
-                raise NotADirectoryError(f"Not a directory: {path}")
-
-            self.monitor_path = path
-            self.observer = Observer()
-            self.observer.schedule(
-                BaseFileHandler(self.handle_file_change),
-                path,
-                recursive=True
-            )
-            self.observer.start()
-            self.running = True
-            self.logger.info(f"Started monitoring: {path}")
-            return True
+            self.log_activity(f"File {event_type}: {file_path}")
+            self.handle_file_change(event_type, file_path)
         except Exception as e:
-            self.logger.error(f"Error starting monitoring: {e}")
-            return False
+            self.log_error(f"Error handling file change: {str(e)}")
+
+    @abstractmethod
+    def handle_file_change(self, event_type: str, file_path: str):
+        """Handle a file change event. Must be implemented by subclasses.
+        
+        Args:
+            event_type: Type of event ('created', 'modified', or 'deleted')
+            file_path: Path to the file that changed
+        """
+        pass
+
+    def start_monitoring(self, path: str):
+        """Start monitoring a directory for file changes."""
+        try:
+            if hasattr(self, '_observer') and self._observer is not None:
+                self.stop_monitoring()
+
+            self._observer = Observer()
+            self._event_handler = BaseFileHandler(self._handle_file_change)
+            self._observer.schedule(self._event_handler, path, recursive=True)
+            self._observer.start()
+            self.log_activity(f"Started monitoring directory: {path}")
+        except Exception as e:
+            self.log_error(f"Error starting file monitoring: {str(e)}")
 
     def stop_monitoring(self):
-        """Stop monitoring directory."""
-        if self.observer:
-            self.observer.stop()
-            self.observer = None
-        self.running = False
-        self.monitor_path = None
-        self.logger.info("Stopped monitoring")
-
-    async def send_agent_message(self, msg_type: str, data: dict) -> None:
-        """Send a typed message to controller.
-
-        Args:
-            msg_type: The type of message (e.g., 'agent_activity', 'ai_analysis')
-            data: The message data matching the type's schema
-        """
-        if not self.ws_agent:
-            self.logger.warning(f"Cannot send agent message, no websocket connection: {msg_type}")
-            return
-
+        """Stop monitoring for file changes."""
         try:
-            message = {
-                "type": msg_type,
-                "timestamp": datetime.now().isoformat(),
-                "agent": self.name,
-                "data": data
-            }
-
-            self.logger.debug(f"Sending agent message: {msg_type}")
-            await self.ws_agent.send(json.dumps(message))
-            self.logger.debug(f"Successfully sent agent message: {msg_type}")
+            if hasattr(self, '_observer') and self._observer is not None:
+                self._observer.stop()
+                self._observer.join()
+                self._observer = None
+                self.log_activity("Stopped file monitoring")
         except Exception as e:
-            self.logger.error(f"Error sending agent message: {e}")
-            await self.reconnect() 
+            self.log_error(f"Error stopping file monitoring: {str(e)}") 

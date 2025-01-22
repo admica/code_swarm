@@ -1,615 +1,620 @@
 #!/usr/bin/env python3
-# PATH: ./agent_code_mon_readme.py
 """
-Agent that automatically generates and maintains README files for Python and Lua modules.
+README Documentation Agent - Monitors Python/Lua files and generates/updates README documentation
+using LLM analysis.
 """
-import sys
-import time
-import os
-import logging
-import ast
-import asyncio
-from pathlib import Path
-from typing import Optional, Dict, List, Tuple
-from shared import LLMClient, config_manager, AgentLogger
-from shared.base_agent import BaseAgent
-from shared.file_monitor import FileMonitor
-import fnmatch
-import json
-from datetime import datetime
-import websockets
 
-# Set up logging
-logger = AgentLogger('code_mon_readme')
+import os
+import sys
+import json
+import asyncio
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import fnmatch
+import signal
+from queue import Queue
+from threading import Lock
+import aiohttp
+import websockets
+import configparser
+
+from shared.base_agent import BaseAgent, BaseFileHandler
+
+@dataclass
+class FileCache:
+    """Cache for file content and metadata."""
+    content: str                   # Full file content
+    last_modified: float          # File's mtime
+    last_analyzed: float          # When we last processed it
+    sections: Dict[str, str] = field(default_factory=dict)  # Cached section analysis
+    
+    def content_changed(self, new_content: str) -> bool:
+        """Check if content has meaningfully changed."""
+        return self.content != new_content
+    
+    def update(self, new_content: str, new_mtime: float) -> bool:
+        """Update cache with new content. Returns True if content changed."""
+        changed = self.content_changed(new_content)
+        self.content = new_content
+        self.last_modified = new_mtime
+        if changed:
+            self.last_analyzed = 0  # Reset analysis time if content changed
+        return changed
+
+class ReadmeFileHandler(BaseFileHandler):
+    """Custom file handler for README agent."""
+    
+    def __init__(self, agent):
+        self.agent = agent
+        super().__init__(self.agent._sync_handle_change)
+        
+    def on_created(self, event):
+        """Handle file creation events."""
+        if event.is_directory:
+            return
+        if not self.should_process_file(event.src_path):
+            return
+        if self._debounce_event(event.src_path):
+            self.callback('created', event.src_path)
+
+    def on_modified(self, event):
+        """Handle file modification events."""
+        if event.is_directory:
+            return
+        if not self.should_process_file(event.src_path):
+            return
+        if self._debounce_event(event.src_path):
+            self.callback('modified', event.src_path)
+
+    def on_deleted(self, event):
+        """Handle file deletion events."""
+        if event.is_directory:
+            return
+        if not self.should_process_file(event.src_path):
+            return
+        if self._debounce_event(event.src_path):
+            self.callback('deleted', event.src_path)
+            if event.src_path in self._last_events:
+                del self._last_events[event.src_path]
 
 class ReadmeAgent(BaseAgent):
-    """Agent that generates and maintains README files."""
+    """Agent for monitoring code files and maintaining README documentation."""
 
-    def __init__(self, root_path: str):
-        """Initialize the readme agent.
+    def __init__(self, name: str = "agent_code_mon_readme", config_path: str = "config.ini"):
+        """Initialize the README agent."""
+        super().__init__(name, config_path)
+        
+        # File processing state
+        self.file_cache: Dict[str, FileCache] = {}
+        self.pending_files: Set[str] = set()
+        self.monitor_path = None  # Track monitored path
+        
+        # Event queue for thread safety
+        self._event_queue = Queue()
+        self._queue_lock = Lock()
+        
+        # Load full config to access template values
+        full_config = configparser.ConfigParser()
+        full_config.read(config_path)
+        template_config = dict(full_config['agent_template']) if 'agent_template' in full_config else {}
+        
+        # Configuration with template fallbacks
+        self.controller_url = self.config.get('controller_url', template_config.get('controller_url', 'http://localhost:8000'))
+        self.watch_patterns = self.config.get('watch_patterns', template_config.get('watch_patterns', '*.py,*.lua')).split(',')
+        self.ignore_patterns = self.config.get('ignore_patterns', template_config.get('ignore_patterns', '__pycache__/*,.*,venv/*,venv_linux/*,node_modules/*,.git/*')).split(',')
+        self.debounce_delay = float(self.config.get('debounce_delay', template_config.get('debounce_delay', '2.0')))
+        
+        # Agent-specific configuration (no template fallbacks)
+        self.batch_window = float(self.config.get('batch_window', 2.0))
+        self.max_queue_size = int(self.config.get('max_queue_size', 50))
+        self.llm_timeout = int(self.config.get('llm_timeout', 180))
+        self.llm_retries = int(self.config.get('llm_retries', 3))
+        self.cache_enabled = self.config.get('cache_enabled', 'true').lower() == 'true'
+        
+        # LLM configuration (with template fallback for model)
+        self.llm_model = self.config.get('llm_model', template_config.get('ollama_model', 'llama3.2'))
+        self.llm_max_tokens = int(self.config.get('llm_max_tokens', 2048))
+        self.llm_temperature = float(self.config.get('llm_temperature', 0.7))
+        
+        # README configuration with template fallbacks
+        self.readme_sections = self.config.get('readme_sections', 'overview,installation,usage,api,examples').split(',')
+        self.ai_start_marker = self.config.get('ai_start_marker', template_config.get('ai_marker_begin', '<!-- AI-GENERATED CONTENT START -->'))
+        self.ai_end_marker = self.config.get('ai_end_marker', template_config.get('ai_marker_end', '<!-- AI-GENERATED CONTENT END -->'))
+        
+        # Batch processing state
+        self._batch_task = None
+        self._event_processor = None
+        self._shutdown = False
+        self._event_handler = None
+        self._observer = None
 
-        Args:
-            root_path: Root directory to monitor
-        """
-        super().__init__('code_mon_readme')
-        self.root_path = root_path
-        self.llm_client = LLMClient('code_mon_readme')
-        self.config = config_manager.get_agent_config('code_mon_readme')
-        self.running = False  # Start as not running
-        self.queue = asyncio.Queue()
-        self._task = None
-        self.file_monitor = None
-        self.last_error = None
-        self.monitor_path = None
-        self._is_connected = False  # Track connection state
-
-    @property
-    def is_connected(self):
-        """Check if the agent is currently connected."""
-        return self._is_connected and self.ws_agent is not None
-
-    async def connect(self):
-        """Connect to the controller via WebSocket."""
-        success = await super().connect()
-        self._is_connected = success
-        return success
-
-    async def disconnect(self):
-        """Disconnect from the controller."""
-        await super().disconnect()
-        self._is_connected = False
-
-    async def cleanup_connection(self):
-        """Clean up the WebSocket connection."""
-        await self.disconnect()
-        self._is_connected = False
-
-    async def ensure_connection(self):
-        """Ensure WebSocket connections are active."""
-        if not self.is_connected:
-            success = await self.connect()
-            self._is_connected = success
-            return success
-        return True
-
-    def extract_docstring(self, node: ast.AST) -> str:
-        """Extract docstring from an AST node."""
-        if not (isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)) and 
-                ast.get_docstring(node)):
-            return ""
-        return ast.get_docstring(node) or ""
-
-    def analyze_code(self, content: str) -> Dict[str, any]:
-        """Analyze code and extract key information."""
-        try:
-            tree = ast.parse(content)
-
-            # Extract module-level information
-            module_info = {
-                'docstring': self.extract_docstring(tree),
-                'classes': [],
-                'functions': [],
-                'imports': []
+    def get_status(self) -> Dict[str, Any]:
+        """Get current agent status."""
+        status = super().get_status()
+        status.update({
+            "agent_type": "readme",  # Identify agent type
+            "capabilities": ["llm", "file_monitor"],  # Declare capabilities
+            "monitor_status": {
+                "running": self.running,
+                "path": self.monitor_path,
+                "monitored_files": len(self.file_cache),
+                "watch_patterns": self.watch_patterns,
+                "ignore_patterns": self.ignore_patterns,
+                "pending_changes": len(self.pending_files)
+            },
+            "readme_status": {
+                "queue_size": len(self.pending_files),
+                "cache": self._get_cache_stats(),
+                "sections": self.readme_sections,
+                "last_generation": max((f.last_analyzed for f in self.file_cache.values()), default=0)
             }
+        })
+        return status
 
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef):
-                    class_info = {
-                        'name': node.name,
-                        'docstring': self.extract_docstring(node),
-                        'methods': []
-                    }
-
-                    for subnode in node.body:
-                        if isinstance(subnode, ast.FunctionDef):
-                            method_info = {
-                                'name': subnode.name,
-                                'docstring': self.extract_docstring(subnode),
-                                'args': [arg.arg for arg in subnode.args.args if arg.arg != 'self']
-                            }
-                            class_info['methods'].append(method_info)
-
-                    module_info['classes'].append(class_info)
-
-                elif isinstance(node, ast.FunctionDef) and node.name != '__init__':
-                    function_info = {
-                        'name': node.name,
-                        'docstring': self.extract_docstring(node),
-                        'args': [arg.arg for arg in node.args.args]
-                    }
-                    module_info['functions'].append(function_info)
-
-                elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                    if isinstance(node, ast.Import):
-                        for name in node.names:
-                            module_info['imports'].append(name.name)
-                    else:
-                        module = node.module or ''
-                        for name in node.names:
-                            module_info['imports'].append(f"{module}.{name.name}")
-
-            return module_info
-
-        except SyntaxError as e:
-            logger.error(f"Syntax error in code: {e}")
-            return {}
-        except Exception as e:
-            logger.error(f"Error analyzing code: {e}")
-            return {}
-
-    async def get_ai_analysis(self, code_info: Dict[str, any], old_content: Optional[str] = None) -> Optional[str]:
-        """Get AI analysis of the code using LLM.
-
-        Args:
-            code_info: Analyzed code information (from analyze_code)
-        """
-        try:
-            # Extract just the essential information for the overview
-            overview = {
-                'docstring': code_info.get('docstring', '').strip(),
-                'classes': [{'name': c['name'], 
-                           'docstring': c['docstring'].split('.')[0] if c['docstring'] else '',  # Just first sentence
-                           'methods': [m['name'] for m in c.get('methods', [])]} 
-                          for c in code_info.get('classes', [])],
-                'functions': [{'name': f['name'],
-                             'docstring': f['docstring'].split('.')[0] if f['docstring'] else ''}
-                            for f in code_info.get('functions', [])]
-            }
-
-            # Build a concise prompt
-            prompt = f"""Analyze this module and generate a README overview:
-
-Module Purpose:
-{overview['docstring'] or 'No module docstring available.'}
-
-Classes:
-{chr(10).join(f'- {c["name"]}: {c["docstring"]}' for c in overview['classes']) if overview['classes'] else 'None'}
-
-Functions:
-{chr(10).join(f'- {f["name"]}: {f["docstring"]}' for f in overview['functions']) if overview['functions'] else 'None'}
-
-Please provide:
-1. A clear, concise overview of the module's purpose
-2. Key features and functionality
-3. Any notable implementation details
-Keep the response focused and under 250 words."""
-
-            result = await self.llm_client.generate(
-                prompt=prompt,
-                max_tokens=1100,
-                temperature=0.6
-            )
-
-            if result and result.get('response'):
-                # Get the response without any markers that might have been included
-                ai_response = result['response'].strip()
-                ai_response = ai_response.replace('(BEGIN AI Generated)', '')
-                ai_response = ai_response.replace('(END AI Generated)', '')
-                ai_response = ai_response.strip()
-
-                # Add the markers properly
-                return f"(BEGIN AI Generated)\n{ai_response}\n(END AI Generated)"
-
-            return None
-
-        except Exception as e:
-            logger.error(f"Unexpected error in AI analysis: {e}")
-            return None
-
-    async def generate_readme(self, file_path: str, content: str) -> str:
-        """Generate a complete README.md for a code file."""
-        await self.logger.log_activity('analyzing', file_path)
-        old_readme = None
-        readme_path = f"{file_path}_README.md"
-
-        if os.path.exists(readme_path):
-            with open(readme_path, 'r') as f:
-                old_readme = f.read()
-
-        # Analyze the code
-        info = self.analyze_code(content)
-
-        await self.logger.log_activity('generating README for', file_path)
-
-        # Start with file name
-        readme = f"# {os.path.basename(file_path)}\n\n"
-
-        # Overview section
-        readme += "## Overview\n\n"
-
-        # Add docstring if available
-        if info.get('docstring'):
-            docstring = info['docstring'].strip()
-            readme += f"{docstring}\n\n"
-
-        # Get AI summary and generated content
-        ai_summary = await self.get_ai_analysis(info, old_readme)
-
-        # If we have an old readme, preserve non-AI content
-        if old_readme and "## Overview" in old_readme:
-            try:
-                overview_content = old_readme.split("## Overview")[1].split("##")[0].strip()
-                if overview_content:
-                    # Keep any content outside AI markers
-                    parts = overview_content.split("(BEGIN AI Generated)")
-                    if len(parts) > 1:
-                        # Add any content before AI section
-                        if parts[0].strip():
-                            readme += f"{parts[0].strip()}\n\n"
-                    else:
-                        # No AI markers found, treat as manual content
-                        readme += f"{overview_content}\n\n"
-            except Exception as e:
-                logger.warning(f"Error extracting old overview: {e}")
-
-        # Add AI-generated content
-        if ai_summary:
-            # Extract the content between markers
-            ai_content = ai_summary.split("(BEGIN AI Generated)")[1].split("(END AI Generated)")[0].strip()
-
-            # Start AI section
-            readme += "(BEGIN AI Generated)\n"
-
-            # Add AI summary
-            readme += ai_content + "\n\n"
-
-            # Add classes section within AI markers
-            class_section = self.generate_class_section(info.get('classes', []))
-            if class_section:
-                readme += class_section
-
-            # End AI section
-            readme += "(END AI Generated)\n"
-        else:
-            # If no AI content, add classes section without markers
-            class_section = self.generate_class_section(info.get('classes', []))
-            if class_section:
-                readme += class_section
-
-        return readme
-
-    def generate_class_section(self, classes: List[Dict]) -> str:
-        """Generate documentation for classes."""
-        if not classes:
-            return ""
-
-        section = "\n## Classes\n\n"
-        for cls in classes:
-            section += f"### `{cls['name']}`\n\n"
-            if cls['docstring']:
-                section += f"{cls['docstring'].strip()}\n\n"
-
-            if cls['methods']:
-                section += "#### Methods\n\n"
-                for method in cls['methods']:
-                    args_str = ", ".join(method['args'])
-                    section += f"- `{method['name']}({args_str})`"
-                    if method['docstring']:
-                        section += f": {method['docstring'].split('.')[0]}."
-                    section += "\n"
-                section += "\n"
-        return section
-
-    async def update_readme(self, file_path: str, content: str) -> None:
-        """Generate and write README.md file."""
-        try:
-            # Report start of analysis
-            await self.send_activity('analyzing', file_path, {
-                'stage': 'started',
-                'file_type': os.path.splitext(file_path)[1]
-            })
-
-            readme_content = await self.generate_readme(file_path, content)
-            readme_path = f"{file_path}_README.md"
-
-            # Verify we're not writing an empty or minimal readme
-            if len(readme_content.strip().split('\n')) <= 3:  # Just title and overview header
-                logger.warning("Generated README seems too minimal, skipping update")
-                await self.send_activity('skipped', file_path, {'reason': 'minimal_content'})
-                return
-
-            # Report generation complete
-            await self.send_activity('analyzing', file_path, {
-                'stage': 'generated',
-                'content_length': len(readme_content)
-            })
-
-            with open(readme_path, 'w') as f:
-                f.write(readme_content)
-
-            # Report successful update with details
-            await self.send_activity('updated', readme_path, {
-                'status': 'success',
-                'size': len(readme_content),
-                'sections': readme_content.count('##'),
-                'has_ai_content': '(BEGIN AI Generated)' in readme_content
-            })
-            logger.info(f"Updated README at {readme_path}")
-
-        except Exception as e:
-            # Report error with details
-            error_details = {
-                'error': str(e),
-                'stage': 'unknown',
-                'file_path': file_path
-            }
-            if 'readme_path' in locals():
-                error_details['readme_path'] = readme_path
-            await self.send_activity('error', file_path, error_details)
-            self.last_error = str(e)
-            logger.error(f"Error updating README: {e}")
-            logger.exception("Full traceback:")
-
-    def get_status(self) -> dict:
-        """Get current agent status for controller."""
+    def _get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        now = datetime.now().timestamp()
         return {
-            'status': 'running' if self.running else 'stopped',
-            'root_path': self.root_path,
-            'queue_size': self.queue.qsize() if hasattr(self, 'queue') else 0,
-            'last_error': getattr(self, 'last_error', None),
-            'monitor_active': self.file_monitor is not None and self.file_monitor.is_running(),
-            'processor_active': self._task is not None and not self._task.done() if self._task else False,
-            'config': {
-                'ignore_patterns': self.config.get('ignore_patterns', '').split(','),
-                'file_types': ['.py', '.lua']
-            }
+            'total_files': len(self.file_cache),
+            'pending_analysis': sum(1 for f in self.file_cache.values() if f.last_analyzed == 0),
+            'recently_analyzed': sum(1 for f in self.file_cache.values() if 0 < now - f.last_analyzed <= 3600),
+            'average_file_size': sum(len(f.content) for f in self.file_cache.values()) // max(len(self.file_cache), 1)
         }
 
-    async def handle_controller_message(self, message: dict):
-        """Handle messages from the controller."""
-        await super().handle_controller_message(message)
-
+    async def get_llm_analysis(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """Get LLM analysis using controller's LLM service."""
         try:
-            msg_type = message.get('type')
-            data = message.get('data', {})
-
-            if msg_type == 'analyze_file':
-                file_path = data.get('path')
-                if file_path and os.path.exists(file_path):
-                    await self.send_activity('received_request', file_path, {'type': 'analyze_file'})
-                    with open(file_path, 'r') as f:
-                        content = f.read()
-                    await self.update_readme(file_path, content)
-
-            elif msg_type == 'process_directory':
-                path = data.get('path')
-                if path:
-                    await self.send_activity('received_request', path, {'type': 'process_directory'})
-                    await self.process_existing_files(path)
-
-            elif msg_type == 'update_config':
-                # Handle configuration updates
-                if 'ignore_patterns' in data:
-                    self.config['ignore_patterns'] = data['ignore_patterns']
-                    await self.send_activity('config_updated', '', {'config': self.config})
-
-            elif msg_type == 'clear_queue':
-                # Clear the processing queue
-                while not self.queue.empty():
-                    try:
-                        self.queue.get_nowait()
-                        self.queue.task_done()
-                    except asyncio.QueueEmpty:
-                        break
-                await self.send_activity('queue_cleared', '', {'queue_size': 0})
-
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.controller_url}/api/llm/generate",
+                    json={
+                        "prompt": prompt,
+                        "agent": self.name,
+                        "model": self.llm_model,
+                        "max_tokens": self.llm_max_tokens,
+                        "temperature": self.llm_temperature
+                    }
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        return result
+                    else:
+                        error_content = await response.text()
+                        self.logger.error(f"LLM request failed: {response.status} - {error_content}")
+                        return None
         except Exception as e:
-            self.last_error = str(e)
-            await self.send_activity('error', '', {
-                'error': str(e),
-                'message_type': msg_type,
-                'message_data': data
-            })
-            logger.error(f"Error handling controller message: {e}")
+            self.logger.error(f"Error getting LLM analysis: {e}")
+            return None
 
-    async def process_file(self, file_path: str, content: str) -> None:
-        """Process a single file."""
+    def start_monitoring(self, path: str):
+        """Start monitoring a directory for file changes."""
         try:
-            if self.should_ignore(file_path):
-                logger.debug(f"Ignoring file due to pattern match: {file_path}")
-                return
+            if self._observer:
+                self.stop_monitoring()
 
-            await self.update_readme(file_path, content)
+            # Store the monitored path
+            self.monitor_path = os.path.abspath(path)
+            
+            # Create directory if it doesn't exist
+            if not os.path.exists(self.monitor_path):
+                os.makedirs(self.monitor_path)
+            elif not os.path.isdir(self.monitor_path):
+                raise NotADirectoryError(f"Not a directory: {self.monitor_path}")
+
+            # Set up the observer with our custom handler
+            self._observer = Observer()
+            self._event_handler = ReadmeFileHandler(self)
+            self._observer.schedule(
+                self._event_handler,
+                self.monitor_path,
+                recursive=True
+            )
+            self._observer.start()
+            self.running = True
+            
+            # Log success
+            self.logger.info(f"Started monitoring: {self.monitor_path}")
+            return True
+            
         except Exception as e:
-            self.last_error = str(e)
-            logger.error(f"Error processing file {file_path}: {e}")
+            self.logger.error(f"Error starting monitoring: {e}")
+            return False
 
-    async def on_file_modified(self, file_path: str) -> None:
-        """Handle file modification events."""
-        try:
-            if self.should_ignore(file_path):
-                logger.debug(f"Ignoring modified file due to pattern match: {file_path}")
-                return
+    def stop_monitoring(self):
+        """Stop monitoring for file changes."""
+        if self._observer:
+            self._observer.stop()
+            self._observer.join()
+            self._observer = None
+            self.monitor_path = None
+            self.running = False
+            self.logger.info("Stopped monitoring")
 
-            logger.info(f"Detected modification to {file_path}")
+    def _sync_handle_change(self, event_type: str, file_path: str):
+        """Thread-safe handler for file changes."""
+        if self.running and not self._shutdown:
+            with self._queue_lock:
+                self._event_queue.put((event_type, file_path))
 
+    async def _process_event_queue(self):
+        """Process events from the queue in the async context."""
+        while self.running and not self._shutdown:
             try:
-                with open(file_path, 'r') as f:
-                    content = f.read()
-
-                # Add to queue for processing
-                await self.queue.put((file_path, content))
-
+                # Process all available events
+                while not self._event_queue.empty():
+                    with self._queue_lock:
+                        event_type, file_path = self._event_queue.get_nowait()
+                    await self.handle_file_change(event_type, file_path)
+                
+                # Wait before checking again
+                await asyncio.sleep(0.1)
             except Exception as e:
-                logger.error(f"Error processing file {file_path}: {e}")
-                self.last_error = str(e)
+                self.logger.error(f"Error processing event queue: {e}")
 
-        except Exception as e:
-            logger.error(f"Error in file modification handler: {e}")
-            self.last_error = str(e)
+    async def handle_file_change(self, event_type: str, file_path: str) -> None:
+        """Handle file change events."""
+        if not self.running or self._shutdown:
+            return
 
-    def should_ignore(self, file_path: str) -> bool:
-        """Check if a file should be ignored based on patterns."""
-        rel_path = os.path.relpath(file_path)
-        return any(
-            fnmatch.fnmatch(rel_path, pattern.strip())
-            for pattern in self.config.get('ignore_patterns', '').split(',')
-            if pattern.strip()
+        # For deletions, remove from cache and skip processing
+        if event_type == 'deleted':
+            if file_path in self.file_cache:
+                del self.file_cache[file_path]
+            return
+
+        if not os.path.exists(file_path) or not os.path.isfile(file_path):
+            return
+
+        # Skip if file is in ignore patterns
+        for pattern in self.ignore_patterns:
+            if fnmatch.fnmatch(file_path, pattern):
+                return
+
+        # Only process files that match the watch patterns
+        if not any(fnmatch.fnmatch(file_path, pattern) for pattern in self.watch_patterns):
+            return
+
+        # Log the change
+        await self.log_activity(
+            action=f"file_{event_type}",
+            file_path=file_path,
+            details={"status": "queued"}
         )
 
-    async def process_existing_files(self, path: str) -> None:
-        """Process all existing code files in the directory that don't have READMEs."""
-        for root, _, files in os.walk(path):
-            for file in files:
-                if not (file.endswith('.py') or file.endswith('.lua')):
-                    continue
+        self.pending_files.add(file_path)
+        
+        # Start batch processing if not already running
+        if not self._batch_task or self._batch_task.done():
+            self._batch_task = asyncio.create_task(self._process_batch())
 
-                file_path = os.path.join(root, file)
-                if self.should_ignore(file_path):
-                    logger.debug(f"Ignoring file due to pattern match: {file_path}")
-                    continue
-
-                readme_path = f"{file_path}_README.md"
-
-                if os.path.exists(readme_path):
-                    continue
-
-                logger.info(f"Processing existing file: {file_path}")
-                try:
-                    with open(file_path, 'r') as f:
-                        content = f.read()
-
-                    # Add to queue for processing
-                    await self.queue.put((file_path, content))
-                except Exception as e:
-                    logger.error(f"Error processing existing file {file_path}: {e}")
-                    self.last_error = str(e)
-
-    async def start_processing(self):
-        """Start processing the file queue."""
-        last_update = 0
-        update_delay = 2.0  # Minimum time between updates
-        batch_window = 2.0  # Time window to batch changes
-        pending_files = {}  # Track pending files and their latest content
-
-        while True:
-            try:
-                # Get the next file from queue
-                file_path, content = await self.queue.get()
-
-                # Update pending files
-                pending_files[file_path] = content
-
-                # Apply debouncing
-                now = time.time()
-                if now - last_update < update_delay:
-                    self.queue.task_done()
-                    continue
-
-                # Wait for batch window to collect more changes
-                try:
-                    while True:
-                        if time.time() - now >= batch_window:
-                            break
-                        try:
-                            next_file, next_content = await asyncio.wait_for(
-                                self.queue.get(),
-                                timeout=batch_window - (time.time() - now)
-                            )
-                            pending_files[next_file] = next_content
-                            self.queue.task_done()
-                        except asyncio.TimeoutError:
-                            break
-                except Exception as e:
-                    logger.error(f"Error in batch collection: {e}")
-
-                # Process all pending files
-                for file_path, content in pending_files.items():
-                    try:
-                        await self.update_readme(file_path, content)
-                    except Exception as e:
-                        logger.error(f"Error updating README for {file_path}: {e}")
-
-                # Clear pending files and update timestamp
-                pending_files.clear()
-                last_update = time.time()
-                self.queue.task_done()
-
-            except asyncio.CancelledError:
+    async def _process_batch(self) -> None:
+        """Process batched file changes."""
+        while self.running and not self._shutdown:
+            if not self.pending_files:
                 break
-            except Exception as e:
-                logger.error(f"Error in queue processor: {e}")
-                await asyncio.sleep(1)
-                if self.queue.qsize() > 0:
-                    self.queue.task_done()  # Prevent queue from growing indefinitely on errors
 
-    async def start(self, path: str):
-        """Start the agent with monitoring and WebSocket communication."""
-        if not self.running:
-            self.running = True
+            # Wait for batch window to collect changes
+            await asyncio.sleep(self.batch_window)
+            
+            # Process files in batch
+            files_to_process = list(self.pending_files)[:self.max_queue_size]
+            self.pending_files.difference_update(files_to_process)
 
-            # Initialize file monitor with async callback wrapper
-            self.monitor_path = path
-            async def async_callback(file_path):
-                await self.on_file_modified(file_path)
-            self.file_monitor = FileMonitor('code_mon_readme', lambda fp: asyncio.create_task(async_callback(fp)))
-            self.file_monitor.start(path)
+            for file_path in files_to_process:
+                try:
+                    await self._process_file(file_path)
+                except Exception as e:
+                    await self.log('error', 'file_processing', f"Error processing {file_path}: {e}")
 
-            # Start queue processor if needed
-            if not self._task or self._task.done():
-                self._task = asyncio.create_task(self.start_processing())
+    async def _process_file(self, file_path: str) -> None:
+        """Process a single file change."""
+        try:
+            # Get file stats and content
+            stats = os.stat(file_path)
+            with open(file_path, 'r', encoding='utf-8') as f:
+                new_content = f.read()
 
-            # Process existing files
-            logger.info("Processing existing files...")
-            await self.process_existing_files(path)
+            # Check cache if enabled
+            if self.cache_enabled:
+                cached = self.file_cache.get(file_path)
+                if cached:
+                    if not cached.update(new_content, stats.st_mtime):
+                        await self.log_activity(
+                            action="file_skipped",
+                            file_path=file_path,
+                            details={
+                                "reason": "no_content_changes",
+                                "last_analyzed": datetime.fromtimestamp(cached.last_analyzed).isoformat()
+                            }
+                        )
+                        return
+                else:
+                    # New file, create cache entry
+                    self.file_cache[file_path] = FileCache(
+                        content=new_content,
+                        last_modified=stats.st_mtime,
+                        last_analyzed=0  # Never analyzed
+                    )
 
-            logger.info(f"Started monitoring directory: {path}")
+            # Generate/update README
+            await self._update_readme(file_path, new_content)
+            
+            # Update last analyzed time
+            if file_path in self.file_cache:
+                self.file_cache[file_path].last_analyzed = datetime.now().timestamp()
+            
+        except Exception as e:
+            await self.log('error', 'file_processing', f"Error processing {file_path}: {e}")
 
-            # Run both the queue processor and WebSocket handler concurrently
-            try:
-                await asyncio.gather(
-                    self.run(),  # WebSocket handler
-                    self._task   # Queue processor
+    async def _update_readme(self, file_path: str, content: str) -> None:
+        """Update README documentation based on file changes."""
+        try:
+            # Generate README path by appending _README.md to the input file path
+            readme_path = f"{file_path}_README.md"
+            
+            # Generate documentation using LLM
+            prompt = self._generate_readme_prompt(file_path, content)
+            
+            await self.log_activity(
+                action="llm_request",
+                file_path=file_path,
+                details={"status": "started"}
+            )
+            
+            for attempt in range(self.llm_retries):
+                try:
+                    response = await asyncio.wait_for(
+                        self.get_llm_analysis(prompt),
+                        timeout=self.llm_timeout
+                    )
+                    if response and response.get('response'):
+                        break
+                except asyncio.TimeoutError:
+                    if attempt == self.llm_retries - 1:
+                        raise
+                    await asyncio.sleep(1)
+                    continue
+
+            if not response or not response.get('response'):
+                await self.log('error', 'readme_generation', f"Failed to generate README content for {file_path}")
+                return
+
+            # Update README file
+            await self._write_readme(readme_path, response['response'])
+            
+            await self.log_activity(
+                action="readme_updated",
+                file_path=readme_path,
+                details={
+                    "source_file": file_path,
+                    "status": "completed"
+                }
+            )
+
+        except Exception as e:
+            await self.log('error', 'readme_generation', f"Error updating README for {file_path}: {e}")
+
+    def _generate_readme_prompt(self, file_path: str, content: str) -> str:
+        """Generate prompt for README documentation."""
+        return f"""Analyze the following code file and generate documentation for a README.md file.
+Focus on these sections: {', '.join(self.readme_sections)}
+
+File: {file_path}
+
+Content:
+{content}
+
+Please provide clear, concise documentation that explains the purpose, functionality, and usage of this code.
+Include relevant examples where appropriate.
+"""
+
+    async def _write_readme(self, readme_path: str, content: str) -> None:
+        """Write content to README file with AI markers."""
+        try:
+            existing_content = ''
+            if os.path.exists(readme_path):
+                with open(readme_path, 'r', encoding='utf-8') as f:
+                    existing_content = f.read()
+
+            # Extract non-AI content
+            start_idx = existing_content.find(self.ai_start_marker)
+            end_idx = existing_content.find(self.ai_end_marker)
+            
+            if start_idx == -1 or end_idx == -1:
+                # No existing AI content, append new content
+                final_content = f"{existing_content}\n\n{self.ai_start_marker}\n{content}\n{self.ai_end_marker}"
+            else:
+                # Replace existing AI content
+                before = existing_content[:start_idx]
+                after = existing_content[end_idx + len(self.ai_end_marker):]
+                final_content = f"{before}{self.ai_start_marker}\n{content}\n{self.ai_end_marker}{after}"
+
+            # Write updated content
+            with open(readme_path, 'w', encoding='utf-8') as f:
+                f.write(final_content)
+
+        except Exception as e:
+            await self.log('error', 'readme_write', f"Error writing README {readme_path}: {e}")
+
+    async def stop(self) -> None:
+        """Stop the agent."""
+        self._shutdown = True
+        
+        try:
+            # Stop batch processing
+            if self._batch_task:
+                self._batch_task.cancel()
+                try:
+                    await self._batch_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Stop monitoring and disconnect (handled by base agent)
+            await super().stop()
+
+        except Exception as e:
+            self.logger.error(f"Error during shutdown: {e}")
+
+    async def handle_controller_message(self, message: dict):
+        """Handle messages received from the controller."""
+        try:
+            msg_type = message.get('type')
+            if msg_type == 'readme_config':
+                # Handle README-specific configuration updates
+                config = message.get('data', {})
+                if 'sections' in config:
+                    self.readme_sections = config['sections']
+                if 'cache_enabled' in config:
+                    self.cache_enabled = config['cache_enabled']
+                await self.log_activity(
+                    action="config_updated",
+                    file_path="",
+                    details={"config": config}
                 )
-            except asyncio.CancelledError:
-                logger.info("Agent tasks cancelled")
-                raise
-            except Exception as e:
-                logger.error(f"Error in agent tasks: {e}")
-                raise
+            elif msg_type == 'cache_invalidate':
+                # Handle cache invalidation requests
+                patterns = message.get('data', {}).get('patterns', ['*'])
+                invalidated = 0
+                for file_path in list(self.file_cache.keys()):
+                    for pattern in patterns:
+                        if fnmatch.fnmatch(file_path, pattern):
+                            self.file_cache[file_path].last_analyzed = 0
+                            invalidated += 1
+                            break
+                await self.log_activity(
+                    action="cache_invalidated",
+                    file_path="",
+                    details={"patterns": patterns, "count": invalidated}
+                )
+            else:
+                # Handle base messages
+                await super().handle_controller_message(message)
+        except Exception as e:
+            self.logger.error(f"Error handling controller message: {e}")
 
-    async def stop(self):
-        """Stop the agent and cleanup."""
-        logger.info("Stopping readme agent...")
-        self.running = False
+    async def run(self):
+        """Main agent run loop."""
+        try:
+            # Establish connections
+            if not await self.connect():
+                self.logger.error("Failed to establish connections")
+                return
 
-        # Stop the queue processor
-        if self._task:
-            self._task.cancel()
+            self.running = True
+            
+            # Start event queue processor
+            self._event_processor = asyncio.create_task(self._process_event_queue())
+            
+            # Start health check loop
+            health_check_task = asyncio.create_task(self._health_check_loop())
+
+            # Main message handling loop
+            while self.running:
+                try:
+                    message = await self.ws_agent.recv()
+                    data = json.loads(message)
+                    await self.handle_controller_message(data)
+                    self.last_activity = datetime.now()
+                except websockets.exceptions.ConnectionClosed:
+                    self.logger.error("Lost connection to controller")
+                    break
+                except Exception as e:
+                    self.logger.error(f"Error in message loop: {e}")
+                    break
+
+        finally:
+            self.running = False
+            self.stop_monitoring()
+            await self.disconnect()
+            if 'health_check_task' in locals():
+                health_check_task.cancel()
+            if self._event_processor:
+                self._event_processor.cancel()
+
+    async def log_activity(self, action: str, file_path: str, details: dict = None) -> None:
+        """Log activity and send it through both logging and agent websocket."""
+        # Log through regular logging system
+        self.logger.info(f"{action}: {file_path}", category='activity')
+
+        # Send through agent websocket
+        await self.send_agent_message("agent_activity", {
+            "action": action,
+            "file_path": file_path,
+            "details": details or {}
+        })
+
+    async def connect(self) -> bool:
+        """Establish permanent connections to the controller."""
+        try:
+            # Connect to logs endpoint
+            self.ws_logs = await websockets.connect(f"ws://localhost:8000/ws/logs")
+            self.logger.info("Connected to log stream")
+
+            # Connect to agent endpoint
+            self.ws_agent = await websockets.connect(f"ws://localhost:8000/ws/agent")
+
+            # Send initial connect message with capabilities
+            connect_message = {
+                "type": "agent_connect",
+                "timestamp": datetime.now().isoformat(),
+                "agent": self.name,
+                "data": {
+                    "status": self.get_status(),
+                    "capabilities": ["llm", "file_monitor"],
+                    "agent_type": "readme"
+                }
+            }
+            await self.ws_agent.send(json.dumps(connect_message))
+
+            # Wait for confirmation
             try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+                response = await asyncio.wait_for(self.ws_agent.recv(), timeout=5.0)
+                data = json.loads(response)
+                if data.get('type') == 'connection_confirmed':
+                    self.logger.info("Connected to agent message stream")
+                    return True
+                else:
+                    self.logger.error(f"Unexpected response during handshake: {data}")
+                    return False
+            except asyncio.TimeoutError:
+                self.logger.error("Timeout waiting for connection confirmation")
+                return False
 
-        # Stop file monitoring
-        if self.file_monitor:
-            self.file_monitor.stop()
-            self.file_monitor = None
+        except Exception as e:
+            self.logger.error(f"Failed to establish connections: {e}")
+            await self.disconnect()
+            return False
 
-        # Clean up state
-        self.monitor_path = None
-
-        # Disconnect WebSockets
-        await self.disconnect()
-        logger.info("Readme agent stopped")
-
-async def main(path: str) -> None:
-    """Main function to run the README generator agent."""
-    agent = None
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print("Usage: agent_code_mon_readme.py <monitor_path>")
+        sys.exit(1)
+        
+    monitor_path = sys.argv[1]
+    agent = ReadmeAgent()
+    
+    # Set up signal handlers for graceful shutdown
+    def handle_shutdown(signum, frame):
+        print("\nShutting down gracefully...")
+        agent._shutdown = True
+        if agent._observer:
+            agent.stop_monitoring()
+        sys.exit(0)
+        
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    
+    # Start the agent
     try:
-        agent = ReadmeAgent(path)
-        await agent.start(path)  # This will run until the agent is stopped
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        if agent:
-            await agent.stop()
-        sys.exit(1)
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        logger.error("Please provide the directory path to monitor")
-        sys.exit(1)
-
-    path = sys.argv[1]
-    asyncio.run(main(path))
+        if not agent.start_monitoring(monitor_path):
+            print("Failed to start monitoring")
+            sys.exit(1)
+        asyncio.run(agent.run())
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        agent.stop_monitoring() 
