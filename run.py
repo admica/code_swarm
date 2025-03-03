@@ -2,6 +2,7 @@
 """
 Launcher script for Code Swarm - manages both backend and frontend services.
 """
+
 import os
 import sys
 import subprocess
@@ -10,16 +11,16 @@ import time
 from pathlib import Path
 import psutil
 import logging
-from typing import Optional, List, Dict
+from typing import Optional
 import threading
 from queue import Queue, Empty
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger('code_swarm_launcher')
+logger = logging.getLogger("code_swarm_launcher")
+
 
 class ServiceManager:
     """Manages the backend and frontend services."""
@@ -28,15 +29,15 @@ class ServiceManager:
         self.backend_process: Optional[subprocess.Popen] = None
         self.frontend_process: Optional[subprocess.Popen] = None
         self.workspace_root = Path(__file__).parent
-        self.frontend_dir = self.workspace_root / 'frontend'
-        self.backend_script = self.workspace_root / 'agent_swarm_controller.py'
+        self.frontend_dir = self.workspace_root / "frontend"
+        self.backend_script = self.workspace_root / "agent_swarm_controller.py"
 
     def _is_port_in_use(self, port: int) -> bool:
         """Check if a port is in use."""
         try:
             # Only consider LISTEN state as "in use" - ignore TIME_WAIT
-            for conn in psutil.net_connections(kind='inet'):
-                if conn.laddr.port == port and conn.status == 'LISTEN':
+            for conn in psutil.net_connections(kind="inet"):
+                if conn.laddr.port == port and conn.status == "LISTEN":
                     return True
             return False
         except Exception as e:
@@ -64,18 +65,28 @@ class ServiceManager:
         try:
             killed_something = False
             # Only try to kill processes in LISTEN state
-            for conn in psutil.net_connections(kind='inet'):
-                if conn.laddr.port == port and conn.status == 'LISTEN' and conn.pid is not None:
+            for conn in psutil.net_connections(kind="inet"):
+                if (
+                    conn.laddr.port == port
+                    and conn.status == "LISTEN"
+                    and conn.pid is not None
+                ):
                     try:
                         process = psutil.Process(conn.pid)
-                        logger.info(f"Found listening process on port {port} (PID: {conn.pid})")
+                        logger.info(
+                            f"Found listening process on port {port} (PID: {conn.pid})"
+                        )
 
                         # Try graceful shutdown first
                         process.terminate()
                         try:
-                            process.wait(timeout=5)  # Increased timeout for graceful shutdown
+                            process.wait(
+                                timeout=5
+                            )  # Increased timeout for graceful shutdown
                         except psutil.TimeoutExpired:
-                            logger.warning(f"Process {conn.pid} did not terminate gracefully, forcing kill")
+                            logger.warning(
+                                f"Process {conn.pid} did not terminate gracefully, forcing kill"
+                            )
                             process.kill()  # Force kill
                             process.wait(timeout=3)  # Increased timeout for force kill
 
@@ -96,8 +107,10 @@ class ServiceManager:
                     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                         logger.error(f"Error accessing process on port {port}: {e}")
                         continue
-                elif conn.laddr.port == port and conn.status == 'TIME_WAIT':
-                    logger.info(f"Found socket in TIME_WAIT state on port {port} - this is normal, ignoring")
+                elif conn.laddr.port == port and conn.status == "TIME_WAIT":
+                    logger.info(
+                        f"Found socket in TIME_WAIT state on port {port} - this is normal, ignoring"
+                    )
                     return True  # Consider this a success case
 
             if killed_something:
@@ -107,7 +120,9 @@ class ServiceManager:
                     logger.info(f"Port {port} successfully released")
                     return True
                 else:
-                    logger.error(f"Port {port} still in LISTEN state after killing processes")
+                    logger.error(
+                        f"Port {port} still in LISTEN state after killing processes"
+                    )
                     return False
 
             logger.debug(f"No listening processes found on port {port}")
@@ -126,8 +141,8 @@ class ServiceManager:
         logger.info("Cleaning up existing processes on required ports...")
 
         results = {
-            'backend': self._kill_process_on_port(8000),
-            'frontend': self._kill_process_on_port(3000)
+            "backend": self._kill_process_on_port(8000),
+            "frontend": self._kill_process_on_port(3000),
         }
 
         if all(results.values()):
@@ -143,7 +158,9 @@ class ServiceManager:
 
             # Check if backend is already running
             if self._is_port_in_use(8000):
-                logger.warning("Backend port 8000 is already in use. Is the service already running?")
+                logger.warning(
+                    "Backend port 8000 is already in use. Is the service already running?"
+                )
                 return False
 
             # Create process with non-blocking pipes
@@ -152,8 +169,13 @@ class ServiceManager:
             def reader(pipe, queue):
                 try:
                     with pipe:
-                        for line in iter(pipe.readline, ''):
-                            queue.put(('out' if pipe == process.stdout else 'err', line.strip()))
+                        for line in iter(pipe.readline, ""):
+                            queue.put(
+                                (
+                                    "out" if pipe == process.stdout else "err",
+                                    line.strip(),
+                                )
+                            )
                 finally:
                     queue.put(None)
 
@@ -165,12 +187,18 @@ class ServiceManager:
                 text=True,
                 bufsize=1,  # Line buffered
                 universal_newlines=True,
-                preexec_fn=os.setsid if os.name != 'nt' else None  # Create new process group on Unix
+                preexec_fn=os.setsid
+                if os.name != "nt"
+                else None,  # Create new process group on Unix
             )
 
             # Start output reader threads
-            threading.Thread(target=reader, args=[process.stdout, output_queue], daemon=True).start()
-            threading.Thread(target=reader, args=[process.stderr, output_queue], daemon=True).start()
+            threading.Thread(
+                target=reader, args=[process.stdout, output_queue], daemon=True
+            ).start()
+            threading.Thread(
+                target=reader, args=[process.stderr, output_queue], daemon=True
+            ).start()
 
             self.backend_process = process
 
@@ -189,7 +217,7 @@ class ServiceManager:
                                 readers_alive -= 1
                                 continue
                             stream, line = item
-                            logger.error(f"Backend {'error' if stream == 'err' else 'output'}: {line}")
+                            log_process_output("Backend", stream, line)
                         except Empty:
                             break
 
@@ -211,7 +239,7 @@ class ServiceManager:
                                         break
                                     continue
                                 stream, line = item
-                                logger.info(f"Backend {'error' if stream == 'err' else 'output'}: {line}")
+                                log_process_output("Backend", stream, line)
                             except Empty:
                                 continue
 
@@ -225,7 +253,7 @@ class ServiceManager:
                         readers_alive -= 1
                         continue
                     stream, line = item
-                    logger.info(f"Backend {'error' if stream == 'err' else 'output'}: {line}")
+                    log_process_output("Backend", stream, line)
                 except Empty:
                     continue
 
@@ -249,7 +277,9 @@ class ServiceManager:
 
             # Check if frontend is already running
             if self._is_port_in_use(3000):
-                logger.warning("Frontend port 3000 is already in use. Is the service already running?")
+                logger.warning(
+                    "Frontend port 3000 is already in use. Is the service already running?"
+                )
                 return False
 
             # Change to frontend directory
@@ -261,25 +291,36 @@ class ServiceManager:
             def reader(pipe, queue):
                 try:
                     with pipe:
-                        for line in iter(pipe.readline, ''):
-                            queue.put(('out' if pipe == process.stdout else 'err', line.strip()))
+                        for line in iter(pipe.readline, ""):
+                            queue.put(
+                                (
+                                    "out" if pipe == process.stdout else "err",
+                                    line.strip(),
+                                )
+                            )
                 finally:
                     queue.put(None)
 
             # Start the frontend process
             process = subprocess.Popen(
-                ['npm', 'run', 'dev'],
+                ["npm", "run", "dev"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,  # Line buffered
                 universal_newlines=True,
-                preexec_fn=os.setsid if os.name != 'nt' else None  # Create new process group on Unix
+                preexec_fn=os.setsid
+                if os.name != "nt"
+                else None,  # Create new process group on Unix
             )
 
             # Start output reader threads
-            threading.Thread(target=reader, args=[process.stdout, output_queue], daemon=True).start()
-            threading.Thread(target=reader, args=[process.stderr, output_queue], daemon=True).start()
+            threading.Thread(
+                target=reader, args=[process.stdout, output_queue], daemon=True
+            ).start()
+            threading.Thread(
+                target=reader, args=[process.stderr, output_queue], daemon=True
+            ).start()
 
             self.frontend_process = process
 
@@ -298,7 +339,7 @@ class ServiceManager:
                                 readers_alive -= 1
                                 continue
                             stream, line = item
-                            logger.error(f"Frontend {'error' if stream == 'err' else 'output'}: {line}")
+                            log_process_output("Frontend", stream, line)
                         except Empty:
                             break
 
@@ -321,7 +362,7 @@ class ServiceManager:
                                         break
                                     continue
                                 stream, line = item
-                                logger.info(f"Frontend {'error' if stream == 'err' else 'output'}: {line}")
+                                log_process_output("Frontend", stream, line)
                             except Empty:
                                 continue
 
@@ -335,7 +376,7 @@ class ServiceManager:
                         readers_alive -= 1
                         continue
                     stream, line = item
-                    logger.info(f"Frontend {'error' if stream == 'err' else 'output'}: {line}")
+                    log_process_output("Frontend", stream, line)
                 except Empty:
                     continue
 
@@ -426,25 +467,17 @@ class ServiceManager:
         try:
             # Check Python dependencies
             subprocess.run(
-                [sys.executable, '-c', 'import fastapi, uvicorn, watchdog, git'],
+                [sys.executable, "-c", "import fastapi, uvicorn, watchdog, git"],
                 check=True,
-                capture_output=True
+                capture_output=True,
             )
 
             # Check if npm is installed
-            subprocess.run(
-                ['npm', '--version'],
-                check=True,
-                capture_output=True
-            )
+            subprocess.run(["npm", "--version"], check=True, capture_output=True)
 
             # Check frontend dependencies
             os.chdir(self.frontend_dir)
-            subprocess.run(
-                ['npm', 'list'],
-                check=True,
-                capture_output=True
-            )
+            subprocess.run(["npm", "list"], check=True, capture_output=True)
 
             return True
 
@@ -456,6 +489,15 @@ class ServiceManager:
             return False
         finally:
             os.chdir(self.workspace_root)
+
+
+def log_process_output(prefix: str, stream: str, line: str):
+    """Helper to properly log process output."""
+    if stream == "err" and not line.startswith(("INFO:", "DEBUG:", "WARNING:")):
+        logger.error(f"{prefix}: {line}")
+    else:
+        logger.info(f"{prefix}: {line}")
+
 
 def main():
     """Main entry point for the launcher."""
@@ -502,5 +544,7 @@ def main():
     finally:
         manager.stop_services()
 
+
 if __name__ == "__main__":
-    main() 
+    main()
+
